@@ -11,6 +11,6 @@ await runAgentTUI({
       "You are a concise local DS4 agent. Answer in markdown and keep " +
       "responses practical for someone experimenting with local inference.",
   }),
-  reasoning: "hidden",
+  reasoning: "auto-collapsed",
   contextSize: Number(process.env.DS4_CONTEXT_SIZE ?? 32768),
 });
