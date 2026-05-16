@@ -65,6 +65,8 @@ export interface DS4LanguageModelConfig extends DS4ProviderSettings {
 interface ToolParseResult {
   content: LanguageModelV4Content[];
   finishReason?: LanguageModelV4FinishReason;
+  toolCalls: LanguageModelV4ToolCall[];
+  toolDsml?: string;
 }
 
 type AssistantToolCallPromptPart = Extract<
@@ -86,6 +88,8 @@ export class DS4LanguageModel implements LanguageModelV4 {
   private readonly topK?: number;
   private readonly minP?: number;
   private readonly seed?: number;
+  private readonly toolReplay = new Map<string, string>();
+  private readonly toolReplayIds = new Map<string, string[]>();
   private modelHandle: number | null = null;
   private initPromise: Promise<void> | null = null;
 
@@ -106,6 +110,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
     );
 
     const parsed = parseGeneratedContent(result.text, generateOptions.thinkMode !== undefined);
+    this.rememberToolCalls(parsed);
 
     return {
       content: parsed.content,
@@ -187,7 +192,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
 
   private buildGenerateOptions(options: LanguageModelV4CallOptions): GenerateOptions {
     const body: GenerateOptions = {
-      messages: convertMessages(options.prompt, options),
+      messages: this.convertMessages(options.prompt, options),
     };
 
     if (options.maxOutputTokens !== undefined) {
@@ -323,6 +328,9 @@ export class DS4LanguageModel implements LanguageModelV4 {
           const result = await this.runWithAbortSignal(handle, options.abortSignal, () =>
             generateStream(handle, generateOptions, (delta) => {
               generatedText += delta;
+              if (bufferOutput && isCompleteDsmlToolCall(generatedText, generateOptions)) {
+                cancelGeneration(handle);
+              }
               if (!bufferOutput) {
                 emitParsedDelta(delta);
               }
@@ -333,6 +341,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
             generatedText,
             generateOptions.thinkMode !== undefined,
           );
+          this.rememberToolCalls(parsed);
 
           if (bufferOutput) {
             enqueueContentParts(controller, parsed.content);
@@ -402,11 +411,34 @@ export class DS4LanguageModel implements LanguageModelV4 {
       );
     });
   }
+
+  private convertMessages(
+    messages: LanguageModelV4Message[],
+    options: Pick<LanguageModelV4CallOptions, "toolChoice" | "tools"> = {},
+  ): ChatMessage[] {
+    return convertMessages(messages, options, this.toolReplay, this.toolReplayIds);
+  }
+
+  private rememberToolCalls(parsed: ToolParseResult): void {
+    if (!parsed.toolDsml) {
+      return;
+    }
+
+    for (const toolCall of parsed.toolCalls) {
+      this.toolReplay.set(toolCall.toolCallId, parsed.toolDsml);
+    }
+    this.toolReplayIds.set(
+      parsed.toolDsml,
+      parsed.toolCalls.map((toolCall) => toolCall.toolCallId),
+    );
+  }
 }
 
 export function convertMessages(
   messages: LanguageModelV4Message[],
   options: Pick<LanguageModelV4CallOptions, "toolChoice" | "tools"> = {},
+  toolReplay?: ReadonlyMap<string, string>,
+  toolReplayIds?: ReadonlyMap<string, string[]>,
 ): ChatMessage[] {
   const result: ChatMessage[] = [];
   const toolInstructions = formatToolInstructions(options);
@@ -434,20 +466,7 @@ export function convertMessages(
         });
         break;
       case "assistant": {
-        const content = message.content
-          .map((part) => {
-            if (part.type === "text") {
-              return part.text;
-            }
-            if (part.type === "reasoning") {
-              return `${THINK_OPEN}${part.text}${THINK_CLOSE}`;
-            }
-            if (part.type === "tool-call") {
-              return formatAssistantToolCall(part);
-            }
-            return "";
-          })
-          .join("");
+        const content = formatAssistantContent(message.content, toolReplay, toolReplayIds);
         if (content.length > 0) {
           result.push({ role: "assistant", content });
         }
@@ -468,66 +487,76 @@ export function convertMessages(
 
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
-const TOOL_CALL_OPEN = "<tool_call>";
-const TOOL_CALL_CLOSE = "</tool_call>";
-const TOOL_RESULT_OPEN = "<tool_result>";
+const DSML = "｜DSML｜";
+const DSML_SHORT = "DSML｜";
+const DSML_TOOL_CALLS_OPEN = `<${DSML}tool_calls>`;
+const DSML_TOOL_CALLS_CLOSE = `</${DSML}tool_calls>`;
+const DSML_INVOKE_OPEN = `<${DSML}invoke`;
+const DSML_INVOKE_CLOSE = `</${DSML}invoke>`;
+const DSML_PARAMETER_OPEN = `<${DSML}parameter`;
+const DSML_PARAMETER_CLOSE = `</${DSML}parameter>`;
+const DSML_TOOL_CALLS_OPEN_SHORT = `<${DSML_SHORT}tool_calls>`;
+const DSML_TOOL_CALLS_CLOSE_SHORT = `</${DSML_SHORT}tool_calls>`;
+const DSML_INVOKE_OPEN_SHORT = `<${DSML_SHORT}invoke`;
+const DSML_INVOKE_CLOSE_SHORT = `</${DSML_SHORT}invoke>`;
+const DSML_PARAMETER_OPEN_SHORT = `<${DSML_SHORT}parameter`;
+const DSML_PARAMETER_CLOSE_SHORT = `</${DSML_SHORT}parameter>`;
+const PLAIN_TOOL_CALLS_OPEN = "<tool_calls>";
+const PLAIN_TOOL_CALLS_CLOSE = "</tool_calls>";
+const PLAIN_INVOKE_OPEN = "<invoke";
+const PLAIN_INVOKE_CLOSE = "</invoke>";
+const PLAIN_PARAMETER_OPEN = "<parameter";
+const PLAIN_PARAMETER_CLOSE = "</parameter>";
 const TOOL_RESULT_CLOSE = "</tool_result>";
 
-function toContent(text: string, initialInReasoning = false): LanguageModelV4Content[] {
-  const content: LanguageModelV4Content[] = [];
-  let remaining = text;
-  let inReasoning = initialInReasoning || remaining.startsWith(THINK_OPEN);
-  if (inReasoning) {
-    if (remaining.startsWith(THINK_OPEN)) {
-      remaining = remaining.slice(THINK_OPEN.length);
-    }
-  }
-
-  while (remaining.length > 0) {
-    if (inReasoning) {
-      const endIndex = remaining.indexOf(THINK_CLOSE);
-      if (endIndex === -1) {
-        pushContent(content, "reasoning", remaining);
-        break;
-      }
-      pushContent(content, "reasoning", remaining.slice(0, endIndex));
-      remaining = remaining.slice(endIndex + THINK_CLOSE.length);
-      inReasoning = false;
-      continue;
-    }
-
-    const startIndex = findFirstMarkerIndex(remaining, [THINK_OPEN, TOOL_CALL_OPEN]);
-    if (startIndex === -1) {
-      pushContent(content, "text", remaining);
-      break;
-    }
-    pushContent(content, "text", remaining.slice(0, startIndex));
-    if (remaining.startsWith(TOOL_CALL_OPEN, startIndex)) {
-      remaining = remaining.slice(startIndex + TOOL_CALL_OPEN.length);
-      const endIndex = remaining.indexOf(TOOL_CALL_CLOSE);
-      if (endIndex === -1) {
-        pushContent(content, "text", `${TOOL_CALL_OPEN}${remaining}`);
-        break;
-      }
-      const toolCall = parseToolCall(remaining.slice(0, endIndex));
-      if (toolCall) {
-        content.push(toolCall);
-      } else {
-        pushContent(
-          content,
-          "text",
-          `${TOOL_CALL_OPEN}${remaining.slice(0, endIndex)}${TOOL_CALL_CLOSE}`,
-        );
-      }
-      remaining = remaining.slice(endIndex + TOOL_CALL_CLOSE.length);
-    } else {
-      remaining = remaining.slice(startIndex + THINK_OPEN.length);
-      inReasoning = true;
-    }
-  }
-
-  return content;
+interface DsmlSyntax {
+  toolCallsOpen: string;
+  toolCallsClose: string;
+  invokeOpen: string;
+  invokeClose: string;
+  parameterOpen: string;
+  parameterClose: string;
 }
+
+interface DsmlToolCall {
+  toolName: string;
+  input: string;
+}
+
+interface DsmlParseResult {
+  contentText: string;
+  reasoningText?: string;
+  calls: DsmlToolCall[];
+  rawDsml?: string;
+  invalidToolCall?: boolean;
+}
+
+const DSML_SYNTAXES: DsmlSyntax[] = [
+  {
+    toolCallsOpen: DSML_TOOL_CALLS_OPEN,
+    toolCallsClose: DSML_TOOL_CALLS_CLOSE,
+    invokeOpen: DSML_INVOKE_OPEN,
+    invokeClose: DSML_INVOKE_CLOSE,
+    parameterOpen: DSML_PARAMETER_OPEN,
+    parameterClose: DSML_PARAMETER_CLOSE,
+  },
+  {
+    toolCallsOpen: DSML_TOOL_CALLS_OPEN_SHORT,
+    toolCallsClose: DSML_TOOL_CALLS_CLOSE_SHORT,
+    invokeOpen: DSML_INVOKE_OPEN_SHORT,
+    invokeClose: DSML_INVOKE_CLOSE_SHORT,
+    parameterOpen: DSML_PARAMETER_OPEN_SHORT,
+    parameterClose: DSML_PARAMETER_CLOSE_SHORT,
+  },
+  {
+    toolCallsOpen: PLAIN_TOOL_CALLS_OPEN,
+    toolCallsClose: PLAIN_TOOL_CALLS_CLOSE,
+    invokeOpen: PLAIN_INVOKE_OPEN,
+    invokeClose: PLAIN_INVOKE_CLOSE,
+    parameterOpen: PLAIN_PARAMETER_OPEN,
+    parameterClose: PLAIN_PARAMETER_CLOSE,
+  },
+];
 
 function pushContent(
   content: LanguageModelV4Content[],
@@ -553,14 +582,49 @@ function pushContent(
   );
 }
 
-function parseGeneratedContent(text: string, initialInReasoning = false): ToolParseResult {
-  const content = toContent(text, initialInReasoning);
-  const hasToolCall = content.some((part) => part.type === "tool-call");
+export function parseGeneratedContent(text: string, initialInReasoning = false): ToolParseResult {
+  const parsed = parseGeneratedMessage(text, initialInReasoning);
+  const content: LanguageModelV4Content[] = [];
+  pushContent(content, "reasoning", parsed.reasoningText ?? "");
+  pushContent(content, "text", parsed.contentText);
+
+  const toolCalls = parsed.calls.map(
+    (call): LanguageModelV4ToolCall => ({
+      type: "tool-call",
+      toolCallId: crypto.randomUUID(),
+      toolName: call.toolName,
+      input: call.input,
+    }),
+  );
+  content.push(...toolCalls);
 
   return {
     content,
-    finishReason: hasToolCall ? { unified: "tool-calls", raw: "tool-calls" } : undefined,
+    finishReason: toolCalls.length > 0 ? { unified: "tool-calls", raw: "tool-calls" } : undefined,
+    toolCalls,
+    toolDsml: parsed.rawDsml,
   };
+}
+
+function isCompleteDsmlToolCall(text: string, generateOptions: GenerateOptions): boolean {
+  const requireThinkingClosed = generateOptions.thinkMode !== undefined;
+  const searchStart = requireThinkingClosed
+    ? text.lastIndexOf(THINK_CLOSE) + THINK_CLOSE.length
+    : 0;
+
+  if (requireThinkingClosed && searchStart < THINK_CLOSE.length) {
+    return false;
+  }
+
+  const found = findDsmlToolStart(text, searchStart);
+  if (!found) {
+    return false;
+  }
+
+  return (
+    text.indexOf(found.syntax.toolCallsClose, found.start + found.syntax.toolCallsOpen.length) !==
+    -1
+  );
 }
 
 function enqueueContentParts(
@@ -594,6 +658,32 @@ function shouldParseToolOutput(options: Pick<LanguageModelV4CallOptions, "tools"
   return options.tools?.some((tool) => tool.type === "function") ?? false;
 }
 
+function formatAssistantContent(
+  content: Extract<LanguageModelV4Message, { role: "assistant" }>["content"],
+  toolReplay?: ReadonlyMap<string, string>,
+  toolReplayIds?: ReadonlyMap<string, string[]>,
+): string {
+  let text = "";
+  const toolCalls: AssistantToolCallPromptPart[] = [];
+
+  for (const part of content) {
+    if (part.type === "text") {
+      text += part.text;
+    } else if (part.type === "reasoning") {
+      text += `${THINK_OPEN}${part.text}${THINK_CLOSE}`;
+    } else if (part.type === "tool-call") {
+      toolCalls.push(part);
+    }
+  }
+
+  if (toolCalls.length === 0) {
+    return text;
+  }
+
+  const replayed = getReplayedDsml(toolCalls, toolReplay, toolReplayIds);
+  return `${text}${replayed ?? formatAssistantToolCalls(toolCalls)}`;
+}
+
 function formatToolInstructions(
   options: Pick<LanguageModelV4CallOptions, "toolChoice" | "tools">,
 ): string | undefined {
@@ -613,27 +703,86 @@ function formatToolInstructions(
           : "Call a tool only when it is needed to answer the user.";
 
   return [
-    "You can call tools by writing exactly one XML block with a JSON payload:",
-    `${TOOL_CALL_OPEN}{"name":"tool_name","arguments":{"key":"value"}}${TOOL_CALL_CLOSE}`,
-    "When you call a tool, do not add any other text after the tool call.",
-    "Available tools:",
-    JSON.stringify(
-      tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      })),
-    ),
+    "## Tools",
+    "",
+    "You have access to a set of tools to help answer the user question. " +
+      `You can invoke tools by writing a "${DSML_TOOL_CALLS_OPEN}" block like the following:`,
+    "",
+    DSML_TOOL_CALLS_OPEN,
+    `${DSML_INVOKE_OPEN} name="$TOOL_NAME">`,
+    `${DSML_PARAMETER_OPEN} name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE${DSML_PARAMETER_CLOSE}`,
+    "...",
+    DSML_INVOKE_CLOSE,
+    `${DSML_INVOKE_OPEN} name="$TOOL_NAME2">`,
+    "...",
+    DSML_INVOKE_CLOSE,
+    DSML_TOOL_CALLS_CLOSE,
+    "",
+    'String parameters should be specified as raw text and set `string="true"`.',
+    "Preserve characters such as `>`, `&`, and `&&` exactly; never replace normal string characters with XML or HTML entity escapes.",
+    `Only if a string value itself contains the exact closing parameter tag \`${DSML_PARAMETER_CLOSE}\`, write that tag as \`&lt;/${DSML}parameter>\` inside the value.`,
+    'For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.',
+    "",
+    `If thinking_mode is enabled (triggered by ${THINK_OPEN}), you MUST output your complete reasoning inside ${THINK_OPEN}...${THINK_CLOSE} BEFORE any tool calls or final response.`,
+    "",
+    `Otherwise, output directly after ${THINK_CLOSE} with tool calls or final response.`,
+    "",
+    "### Available Tool Schemas",
+    "",
+    tools.map(formatToolSchema).join("\n"),
+    "",
+    "You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls. Use the exact parameter names from the schemas.",
     toolChoiceInstruction,
   ].join("\n");
 }
 
+function formatToolSchema(
+  tool: Extract<NonNullable<LanguageModelV4CallOptions["tools"]>[number], { type: "function" }>,
+): string {
+  return JSON.stringify({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  });
+}
+
+function getReplayedDsml(
+  toolCalls: AssistantToolCallPromptPart[],
+  toolReplay?: ReadonlyMap<string, string>,
+  toolReplayIds?: ReadonlyMap<string, string[]>,
+): string | undefined {
+  if (!toolReplay || toolCalls.length === 0) {
+    return undefined;
+  }
+
+  const first = toolReplay.get(toolCalls[0].toolCallId);
+  if (!first) {
+    return undefined;
+  }
+
+  const ids = toolReplayIds?.get(first);
+  if (ids && ids.length === toolCalls.length) {
+    const sameOrder = toolCalls.every((part, index) => part.toolCallId === ids[index]);
+    if (!sameOrder) {
+      return undefined;
+    }
+  }
+
+  return toolCalls.every((part) => toolReplay.get(part.toolCallId) === first) ? first : undefined;
+}
+
+function formatAssistantToolCalls(parts: AssistantToolCallPromptPart[]): string {
+  if (parts.length === 0) {
+    return "";
+  }
+
+  return `\n\n${DSML_TOOL_CALLS_OPEN}\n${parts.map(formatAssistantToolCall).join("")}${DSML_TOOL_CALLS_CLOSE}`;
+}
+
 function formatAssistantToolCall(part: AssistantToolCallPromptPart): string {
-  return `${TOOL_CALL_OPEN}${JSON.stringify({
-    id: part.toolCallId,
-    name: part.toolName,
-    arguments: part.input,
-  })}${TOOL_CALL_CLOSE}`;
+  return `${DSML_INVOKE_OPEN} name="${escapeDsmlAttribute(part.toolName)}">\n${formatDsmlArguments(
+    stringifyToolInput(part.input),
+  )}${DSML_INVOKE_CLOSE}\n`;
 }
 
 function formatToolResult(
@@ -643,11 +792,13 @@ function formatToolResult(
     return "";
   }
 
-  return `${TOOL_RESULT_OPEN}${JSON.stringify({
-    id: part.toolCallId,
-    name: part.toolName,
-    result: formatToolResultOutput(part.output),
-  })}${TOOL_RESULT_CLOSE}`;
+  return `<tool_result>${escapeToolResultText(
+    JSON.stringify({
+      id: part.toolCallId,
+      name: part.toolName,
+      result: formatToolResultOutput(part.output),
+    }),
+  )}${TOOL_RESULT_CLOSE}`;
 }
 
 function formatToolResultOutput(part: ToolResultPromptPart["output"]): unknown {
@@ -677,30 +828,290 @@ function formatToolResultOutput(part: ToolResultPromptPart["output"]): unknown {
   }
 }
 
-function parseToolCall(text: string): LanguageModelV4ToolCall | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.trim());
-  } catch {
-    return undefined;
+function formatDsmlArguments(input: string): string {
+  const parsed = parseJsonObject(input);
+  if (!parsed) {
+    return `${DSML_PARAMETER_OPEN} name="arguments" string="true">${escapeDsmlParameterText(
+      input,
+    )}${DSML_PARAMETER_CLOSE}\n`;
   }
 
-  if (!isRecord(parsed)) {
-    return undefined;
+  let result = "";
+  for (const [key, value] of Object.entries(parsed)) {
+    const isString = typeof value === "string";
+    const renderedValue = isString ? value : JSON.stringify(value);
+    result += `${DSML_PARAMETER_OPEN} name="${escapeDsmlAttribute(key)}" string="${
+      isString ? "true" : "false"
+    }">${isString ? escapeDsmlParameterText(renderedValue) : escapeDsmlJsonLiteral(renderedValue)}${
+      DSML_PARAMETER_CLOSE
+    }\n`;
+  }
+  return result;
+}
+
+function parseGeneratedMessage(text: string, requireThinkingClosed: boolean): DsmlParseResult {
+  const source = text ?? "";
+  const searchStart = requireThinkingClosed
+    ? source.lastIndexOf(THINK_CLOSE) + THINK_CLOSE.length
+    : 0;
+
+  if (requireThinkingClosed && searchStart < THINK_CLOSE.length) {
+    const content: LanguageModelV4Content[] = [];
+    pushReasoningAndText(content, source, true);
+    return partsToDsmlParseResult(content);
   }
 
-  const name = typeof parsed.name === "string" ? parsed.name : parsed.toolName;
-  if (typeof name !== "string") {
-    return undefined;
+  const found = findDsmlToolStart(source, searchStart);
+  if (!found) {
+    const content: LanguageModelV4Content[] = [];
+    pushReasoningAndText(content, source, requireThinkingClosed);
+    return partsToDsmlParseResult(content);
   }
 
-  const input = "arguments" in parsed ? parsed.arguments : parsed.input;
+  const contentTextEnd = trimTrailingWhitespace(source.slice(0, found.start)).length;
+  const beforeTool = source.slice(0, contentTextEnd);
+  const parsedPrefix: LanguageModelV4Content[] = [];
+  pushReasoningAndText(parsedPrefix, beforeTool, requireThinkingClosed);
+
+  const parsedTool = parseDsmlToolCalls(source, found.start, found.syntax);
+  if (!parsedTool) {
+    return {
+      contentText: source,
+      calls: [],
+      invalidToolCall: true,
+    };
+  }
+
+  const base = partsToDsmlParseResult(parsedPrefix);
   return {
-    type: "tool-call",
-    toolCallId: typeof parsed.id === "string" ? parsed.id : crypto.randomUUID(),
-    toolName: name,
-    input: stringifyToolInput(input),
+    contentText: base.contentText,
+    reasoningText: base.reasoningText,
+    calls: parsedTool.calls,
+    rawDsml: parsedTool.rawDsml,
   };
+}
+
+function partsToDsmlParseResult(content: LanguageModelV4Content[]): DsmlParseResult {
+  let contentText = "";
+  let reasoningText = "";
+  for (const part of content) {
+    if (part.type === "text") {
+      contentText += part.text;
+    } else if (part.type === "reasoning") {
+      reasoningText += part.text;
+    }
+  }
+  return {
+    contentText,
+    reasoningText: reasoningText.length > 0 ? reasoningText : undefined,
+    calls: [],
+  };
+}
+
+function pushReasoningAndText(
+  content: LanguageModelV4Content[],
+  text: string,
+  initialInReasoning = false,
+): void {
+  let remaining = text;
+  let inReasoning = initialInReasoning || remaining.startsWith(THINK_OPEN);
+  if (inReasoning && remaining.startsWith(THINK_OPEN)) {
+    remaining = remaining.slice(THINK_OPEN.length);
+  }
+
+  while (remaining.length > 0) {
+    if (inReasoning) {
+      const endIndex = remaining.indexOf(THINK_CLOSE);
+      if (endIndex === -1) {
+        pushContent(content, "reasoning", remaining);
+        return;
+      }
+      pushContent(content, "reasoning", remaining.slice(0, endIndex));
+      remaining = remaining.slice(endIndex + THINK_CLOSE.length);
+      inReasoning = false;
+      continue;
+    }
+
+    const startIndex = remaining.indexOf(THINK_OPEN);
+    if (startIndex === -1) {
+      pushContent(content, "text", remaining);
+      return;
+    }
+    pushContent(content, "text", remaining.slice(0, startIndex));
+    remaining = remaining.slice(startIndex + THINK_OPEN.length);
+    inReasoning = true;
+  }
+}
+
+function findDsmlToolStart(
+  text: string,
+  fromIndex: number,
+): { start: number; syntax: DsmlSyntax } | undefined {
+  let best: { start: number; syntax: DsmlSyntax } | undefined;
+  for (const syntax of DSML_SYNTAXES) {
+    const index = text.indexOf(syntax.toolCallsOpen, fromIndex);
+    if (index !== -1 && (!best || index < best.start)) {
+      best = { start: index, syntax };
+    }
+  }
+  return best;
+}
+
+function parseDsmlToolCalls(
+  text: string,
+  start: number,
+  syntax: DsmlSyntax,
+): { calls: DsmlToolCall[]; rawDsml: string } | undefined {
+  let index = start;
+  if (!text.startsWith(syntax.toolCallsOpen, index)) {
+    return undefined;
+  }
+  index += syntax.toolCallsOpen.length;
+
+  const calls: DsmlToolCall[] = [];
+  while (index < text.length) {
+    index = skipWhitespace(text, index);
+    if (text.startsWith(syntax.toolCallsClose, index)) {
+      const end = index + syntax.toolCallsClose.length;
+      return {
+        calls,
+        rawDsml: text.slice(start, end),
+      };
+    }
+
+    if (!text.startsWith(syntax.invokeOpen, index)) {
+      return undefined;
+    }
+
+    const invokeTagEnd = text.indexOf(">", index);
+    if (invokeTagEnd === -1) {
+      return undefined;
+    }
+    const invokeTag = text.slice(index, invokeTagEnd + 1);
+    const toolName = parseXmlAttribute(invokeTag, "name");
+    if (!toolName) {
+      return undefined;
+    }
+    index = invokeTagEnd + 1;
+
+    const args: Record<string, unknown> = {};
+    while (index < text.length) {
+      index = skipWhitespace(text, index);
+      if (text.startsWith(syntax.invokeClose, index)) {
+        index += syntax.invokeClose.length;
+        calls.push({ toolName, input: JSON.stringify(args) });
+        break;
+      }
+
+      const parsedParam = parseDsmlParameter(text, index, syntax);
+      if (!parsedParam) {
+        return undefined;
+      }
+      args[parsedParam.name] = parsedParam.value;
+      index = parsedParam.end;
+    }
+  }
+
+  return undefined;
+}
+
+function parseDsmlParameter(
+  text: string,
+  start: number,
+  syntax: DsmlSyntax,
+): { name: string; value: unknown; end: number } | undefined {
+  if (!text.startsWith(syntax.parameterOpen, start)) {
+    return undefined;
+  }
+
+  const tagEnd = text.indexOf(">", start);
+  if (tagEnd === -1) {
+    return undefined;
+  }
+
+  const tag = text.slice(start, tagEnd + 1);
+  const name = parseXmlAttribute(tag, "name");
+  if (!name) {
+    return undefined;
+  }
+  const stringAttribute = parseXmlAttribute(tag, "string");
+  const valueStart = tagEnd + 1;
+  const valueEnd = text.indexOf(syntax.parameterClose, valueStart);
+  if (valueEnd === -1) {
+    return undefined;
+  }
+
+  const rawValue = text.slice(valueStart, valueEnd);
+  const isString = stringAttribute === null || stringAttribute === "true";
+  return {
+    name,
+    value: isString ? unescapeDsmlText(rawValue) : parseJsonValue(rawValue.trim()),
+    end: valueEnd + syntax.parameterClose.length,
+  };
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const parsed = parseJsonValue(text);
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : undefined;
+}
+
+function parseJsonValue(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function parseXmlAttribute(tag: string, name: string): string | null {
+  const match = new RegExp(`${escapeRegExp(name)}="([^"]*)"`).exec(tag);
+  return match ? unescapeDsmlText(match[1]) : null;
+}
+
+function skipWhitespace(text: string, index: number): number {
+  while (index < text.length && /\s/.test(text[index])) {
+    index++;
+  }
+  return index;
+}
+
+function trimTrailingWhitespace(text: string): string {
+  return text.replace(/\s+$/u, "");
+}
+
+function escapeDsmlAttribute(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function escapeDsmlParameterText(text: string): string {
+  return text.replaceAll(DSML_PARAMETER_CLOSE, `&lt;/${DSML}parameter>`);
+}
+
+function escapeDsmlJsonLiteral(text: string): string {
+  return text.replaceAll(DSML_PARAMETER_CLOSE, `\\u003c/${DSML}parameter>`);
+}
+
+function escapeToolResultText(text: string): string {
+  return text.replaceAll(TOOL_RESULT_CLOSE, "&lt;/tool_result>");
+}
+
+function unescapeDsmlText(text: string): string {
+  return text
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&amp;", "&");
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function stringifyToolInput(input: unknown): string {
@@ -711,21 +1122,6 @@ function stringifyToolInput(input: unknown): string {
     return input;
   }
   return JSON.stringify(input) ?? "{}";
-}
-
-function findFirstMarkerIndex(text: string, markers: string[]): number {
-  let firstIndex = -1;
-  for (const marker of markers) {
-    const markerIndex = text.indexOf(marker);
-    if (markerIndex !== -1 && (firstIndex === -1 || markerIndex < firstIndex)) {
-      firstIndex = markerIndex;
-    }
-  }
-  return firstIndex;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function getSafePrefixLength(buffer: string, stopMarker: string): number {
@@ -767,14 +1163,6 @@ function convertUsage(result: GenerateResult | undefined): LanguageModelV4Usage 
 
 function getWarnings(options: LanguageModelV4CallOptions): SharedV4Warning[] {
   const warnings: SharedV4Warning[] = [];
-
-  if (options.tools?.some((tool) => tool.type === "function")) {
-    warnings.push({
-      type: "compatibility",
-      feature: "tools",
-      details: "DS4 tool calls use prompt instructions and parsed XML tool call blocks.",
-    });
-  }
 
   if (options.tools?.some((tool) => tool.type === "provider")) {
     warnings.push({

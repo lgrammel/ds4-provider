@@ -7,8 +7,8 @@
     "build:ts": "pnpm -r build:ts",
     "clean": "pnpm -r clean",
     "typecheck": "pnpm -r typecheck",
-    "format:check": "oxfmt --check \"packages/*/src/**/*.ts\" \"examples/**/*.ts\"",
-    "format:fix": "oxfmt --write \"packages/*/src/**/*.ts\" \"examples/**/*.ts\""
+    "format:check": "oxfmt --check \"packages/*/src/**/*.ts\" \"packages/*/test/**/*.ts\" \"examples/**/*.ts\"",
+    "format:fix": "oxfmt --write \"packages/*/src/**/*.ts\" \"packages/*/test/**/*.ts\" \"examples/**/*.ts\""
   },
   "devDependencies": {
     "oxfmt": "^0.48.0"
