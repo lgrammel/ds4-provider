@@ -1,6 +1,6 @@
 {
   "name": "@lgrammel/ds4-provider",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "DS4 provider for the Vercel AI SDK",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
     "binding.gyp"
   ],
   "scripts": {
-    "postinstall": "node scripts/postinstall.cjs",
+    "install": "node scripts/postinstall.cjs",
     "prepack": "pnpm run vendor:ds4 && pnpm run build:ts",
     "vendor:ds4": "node scripts/vendor-ds4.cjs",
     "build:native": "node-gyp rebuild",

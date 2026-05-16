@@ -18,6 +18,15 @@ Install requirements:
 - Node.js 18 or newer.
 - A working native build toolchain for `node-gyp`.
 - A DS4-compatible DeepSeek V4 Flash GGUF.
+- An ESM project, for example a `package.json` with `"type": "module"`.
+
+If your pnpm version blocks dependency build scripts, approve the native addon
+build after installing:
+
+```sh
+pnpm approve-builds @lgrammel/ds4-provider
+pnpm rebuild @lgrammel/ds4-provider
+```
 
 Download a model using DS4's downloader:
 
