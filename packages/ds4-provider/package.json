@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -13,20 +16,28 @@
   },
   "ds4": {
     "repo": "https://github.com/antirez/ds4.git",
-    "commit": "312935e15cfe1231468bcb3e259088b02012c2fc"
+    "commit": "613e9b2c9b78c09ac9f622bb8ece81c99989ead6"
   },
   "files": [
     "dist",
+    "ds4/ds4.c",
+    "ds4/ds4.h",
+    "ds4/ds4_gpu.h",
+    "ds4/ds4_metal.m",
+    "ds4/LICENSE",
+    "ds4/metal",
     "native",
     "scripts",
     "binding.gyp"
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall.cjs",
+    "prepack": "pnpm run vendor:ds4 && pnpm run build:ts",
+    "vendor:ds4": "node scripts/vendor-ds4.cjs",
     "build:native": "node-gyp rebuild",
     "build:ts": "tsc",
-    "build": "pnpm run build:native && pnpm run build:ts",
-    "clean": "rm -rf dist build ds4",
+    "build": "pnpm run vendor:ds4 && pnpm run build:native && pnpm run build:ts",
+    "clean": "rm -rf dist build",
     "test": "tsx test/ds4-language-model.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.check.json"
   },
@@ -45,10 +56,10 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "4.0.0-canary.16",
-    "node-addon-api": "^8.0.0"
+    "node-addon-api": "^8.0.0",
+    "node-gyp": "^11.5.0"
   },
   "devDependencies": {
-    "node-gyp": "^11.5.0",
     "tsx": "^4.21.0",
     "@types/node": "^20.10.0",
     "typescript": "^5.3.0"

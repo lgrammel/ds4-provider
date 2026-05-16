@@ -5,12 +5,16 @@
   "scripts": {
     "build": "pnpm -r build",
     "build:ts": "pnpm -r build:ts",
+    "changeset": "changeset",
     "clean": "pnpm -r clean",
+    "release": "pnpm build && changeset publish",
     "typecheck": "pnpm -r typecheck",
+    "version-packages": "changeset version",
     "format:check": "oxfmt --check \"packages/*/src/**/*.ts\" \"packages/*/test/**/*.ts\" \"examples/**/*.ts\"",
     "format:fix": "oxfmt --write \"packages/*/src/**/*.ts\" \"packages/*/test/**/*.ts\" \"examples/**/*.ts\""
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "oxfmt": "^0.48.0"
   },
   "engines": {
