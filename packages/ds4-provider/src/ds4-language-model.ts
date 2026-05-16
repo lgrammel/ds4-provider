@@ -45,6 +45,12 @@ export interface DS4ProviderSettings {
   mtpMargin?: number;
   warmWeights?: boolean;
   quality?: boolean;
+  /**
+   * Show native DS4 startup logs on stderr.
+   *
+   * @default false
+   */
+  debug?: boolean;
   topK?: number;
   minP?: number;
   seed?: number;
@@ -73,17 +79,13 @@ export class DS4LanguageModel implements LanguageModelV4 {
     this.seed = config.seed;
   }
 
-  async doGenerate(
-    options: LanguageModelV4CallOptions
-  ): Promise<LanguageModelV4GenerateResult> {
+  async doGenerate(options: LanguageModelV4CallOptions): Promise<LanguageModelV4GenerateResult> {
     throwIfAborted(options.abortSignal);
 
     const handle = await this.ensureModelLoaded();
     const generateOptions = this.buildGenerateOptions(options);
-    const result = await this.runWithAbortSignal(
-      handle,
-      options.abortSignal,
-      () => generate(handle, generateOptions)
+    const result = await this.runWithAbortSignal(handle, options.abortSignal, () =>
+      generate(handle, generateOptions),
     );
 
     return {
@@ -100,9 +102,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
     };
   }
 
-  async doStream(
-    options: LanguageModelV4CallOptions
-  ): Promise<LanguageModelV4StreamResult> {
+  async doStream(options: LanguageModelV4CallOptions): Promise<LanguageModelV4StreamResult> {
     throwIfAborted(options.abortSignal);
 
     const handle = await this.ensureModelLoaded();
@@ -114,7 +114,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
       generateOptions,
       textId,
       warnings,
-      options.abortSignal
+      options.abortSignal,
     );
 
     return {
@@ -148,6 +148,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
         mtpMargin: this.config.mtpMargin,
         warmWeights: this.config.warmWeights,
         quality: this.config.quality,
+        debug: this.config.debug,
       };
 
       this.modelHandle = await loadModel(loadOptions);
@@ -163,9 +164,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
     return this.modelHandle;
   }
 
-  private buildGenerateOptions(
-    options: LanguageModelV4CallOptions
-  ): GenerateOptions {
+  private buildGenerateOptions(options: LanguageModelV4CallOptions): GenerateOptions {
     const body: GenerateOptions = {
       messages: convertMessages(options.prompt),
     };
@@ -200,7 +199,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
     generateOptions: GenerateOptions,
     textId: string,
     warnings: SharedV4Warning[],
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
   ): ReadableStream<LanguageModelV4StreamPart> {
     return new ReadableStream<LanguageModelV4StreamPart>({
       start: async (controller) => {
@@ -222,10 +221,8 @@ export class DS4LanguageModel implements LanguageModelV4 {
         try {
           controller.enqueue({ type: "stream-start", warnings });
 
-          const result = await this.runWithAbortSignal(
-            handle,
-            abortSignal,
-            () => generateStream(handle, generateOptions, emitTextDelta)
+          const result = await this.runWithAbortSignal(handle, abortSignal, () =>
+            generateStream(handle, generateOptions, emitTextDelta),
           );
 
           if (textStarted) {
@@ -248,7 +245,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
   private async runWithAbortSignal<T>(
     handle: number,
     signal: AbortSignal | undefined,
-    run: () => Promise<T>
+    run: () => Promise<T>,
   ): Promise<T> {
     throwIfAborted(signal);
 
@@ -285,15 +282,13 @@ export class DS4LanguageModel implements LanguageModelV4 {
 
       run().then(
         (result) => settle(() => resolve(result)),
-        (error: unknown) => settle(() => reject(error))
+        (error: unknown) => settle(() => reject(error)),
       );
     });
   }
 }
 
-export function convertMessages(
-  messages: LanguageModelV4Message[]
-): ChatMessage[] {
+export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage[] {
   const result: ChatMessage[] = [];
 
   for (const message of messages) {
@@ -350,9 +345,7 @@ function toTextContent(text: string): LanguageModelV4Content[] {
   ];
 }
 
-function convertFinishReason(
-  reason: string | null | undefined
-): LanguageModelV4FinishReason {
+function convertFinishReason(reason: string | null | undefined): LanguageModelV4FinishReason {
   switch (reason) {
     case "stop":
       return { unified: "stop", raw: reason };
@@ -379,9 +372,7 @@ function convertUsage(result: GenerateResult | undefined): LanguageModelV4Usage 
   };
 }
 
-function getWarnings(
-  options: LanguageModelV4CallOptions
-): SharedV4Warning[] {
+function getWarnings(options: LanguageModelV4CallOptions): SharedV4Warning[] {
   const warnings: SharedV4Warning[] = [];
 
   if (options.tools?.length) {

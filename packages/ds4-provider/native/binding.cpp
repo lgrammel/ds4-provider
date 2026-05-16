@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <napi.h>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -64,6 +66,47 @@ static std::atomic<int> g_next_handle{1};
 static std::unordered_map<int, std::vector<GenerateWorker *>> g_generate_workers;
 static std::unordered_map<int, std::vector<StreamGenerateWorker *>> g_stream_workers;
 static std::mutex g_workers_mutex;
+
+class ScopedStderrSilencer {
+public:
+  explicit ScopedStderrSilencer(bool enabled) : enabled_(enabled) {
+    if (!enabled_) {
+      return;
+    }
+
+    fflush(stderr);
+    saved_stderr_fd_ = dup(STDERR_FILENO);
+    null_fd_ = open("/dev/null", O_WRONLY);
+
+    if (saved_stderr_fd_ == -1 || null_fd_ == -1) {
+      Restore();
+      return;
+    }
+
+    dup2(null_fd_, STDERR_FILENO);
+  }
+
+  ~ScopedStderrSilencer() { Restore(); }
+
+private:
+  void Restore() {
+    if (saved_stderr_fd_ != -1) {
+      fflush(stderr);
+      dup2(saved_stderr_fd_, STDERR_FILENO);
+      close(saved_stderr_fd_);
+      saved_stderr_fd_ = -1;
+    }
+
+    if (null_fd_ != -1) {
+      close(null_fd_);
+      null_fd_ = -1;
+    }
+  }
+
+  bool enabled_;
+  int saved_stderr_fd_ = -1;
+  int null_fd_ = -1;
+};
 
 template <typename Worker>
 void RemoveWorker(std::unordered_map<int, std::vector<Worker *>> &workers_by_handle, int handle,
@@ -269,7 +312,8 @@ public:
                                              : 0.0f),
         warm_weights_(options.Has("warmWeights") &&
                       options.Get("warmWeights").As<Napi::Boolean>().Value()),
-        quality_(options.Has("quality") && options.Get("quality").As<Napi::Boolean>().Value()) {}
+        quality_(options.Has("quality") && options.Get("quality").As<Napi::Boolean>().Value()),
+        debug_(options.Has("debug") && options.Get("debug").As<Napi::Boolean>().Value()) {}
 
   void Execute() override {
     auto model = std::make_unique<ModelState>();
@@ -285,9 +329,12 @@ public:
     options.warm_weights = warm_weights_;
     options.quality = quality_;
 
-    if (ds4_engine_open(&model->engine, &options) != 0) {
-      SetError("Failed to open DS4 model: " + model_path_);
-      return;
+    {
+      ScopedStderrSilencer silence_stderr(!debug_);
+      if (ds4_engine_open(&model->engine, &options) != 0) {
+        SetError("Failed to open DS4 model: " + model_path_);
+        return;
+      }
     }
     if (ds4_session_create(&model->session, model->engine, ctx_size_) != 0) {
       SetError("Failed to create DS4 session");
@@ -319,6 +366,7 @@ private:
   float mtp_margin_;
   bool warm_weights_;
   bool quality_;
+  bool debug_;
   int handle_ = -1;
 };
 

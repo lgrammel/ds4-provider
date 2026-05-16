@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 configureMetalSourcePaths();
 
 const binding = require(
-  join(__dirname, "..", "build", "Release", "ds4_binding.node")
+  join(__dirname, "..", "build", "Release", "ds4_binding.node"),
 ) as NativeBinding;
 
 export interface LoadModelOptions {
@@ -22,6 +22,7 @@ export interface LoadModelOptions {
   mtpMargin?: number;
   warmWeights?: boolean;
   quality?: boolean;
+  debug?: boolean;
 }
 
 export interface ChatMessage {
@@ -51,19 +52,19 @@ export interface GenerateResult {
 interface NativeBinding {
   loadModel(
     options: LoadModelOptions,
-    callback: (error: string | null, handle: number | null) => void
+    callback: (error: string | null, handle: number | null) => void,
   ): void;
   unloadModel(handle: number): boolean;
   generate(
     handle: number,
     options: GenerateOptions,
-    callback: (error: string | null, result: GenerateResult | null) => void
+    callback: (error: string | null, result: GenerateResult | null) => void,
   ): void;
   generateStream(
     handle: number,
     options: GenerateOptions,
     tokenCallback: (token: string) => void,
-    doneCallback: (error: string | null, result: GenerateResult | null) => void
+    doneCallback: (error: string | null, result: GenerateResult | null) => void,
   ): void;
   cancelGeneration(handle: number): boolean;
   isModelLoaded(handle: number): boolean;
@@ -74,9 +75,7 @@ export async function loadModel(options: LoadModelOptions): Promise<number> {
 
   await Promise.all([
     validateModelPath(nativeOptions.modelPath, "modelPath"),
-    nativeOptions.mtpPath
-      ? validateModelPath(nativeOptions.mtpPath, "mtpPath")
-      : undefined,
+    nativeOptions.mtpPath ? validateModelPath(nativeOptions.mtpPath, "mtpPath") : undefined,
   ]);
 
   return new Promise((resolve, reject) => {
@@ -96,10 +95,7 @@ export function unloadModel(handle: number): boolean {
   return binding.unloadModel(handle);
 }
 
-export function generate(
-  handle: number,
-  options: GenerateOptions
-): Promise<GenerateResult> {
+export function generate(handle: number, options: GenerateOptions): Promise<GenerateResult> {
   return new Promise((resolve, reject) => {
     binding.generate(handle, options, (error, result) => {
       if (error) {
@@ -120,7 +116,7 @@ export function generate(
 export function generateStream(
   handle: number,
   options: GenerateOptions,
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
 ): Promise<GenerateResult> {
   return new Promise((resolve, reject) => {
     binding.generateStream(handle, options, onToken, (error, result) => {
@@ -176,9 +172,7 @@ function configureMetalSourcePaths(): void {
   }
 }
 
-function omitUndefinedLoadModelOptions(
-  options: LoadModelOptions
-): LoadModelOptions {
+function omitUndefinedLoadModelOptions(options: LoadModelOptions): LoadModelOptions {
   const nativeOptions: LoadModelOptions = {
     modelPath: options.modelPath,
   };
@@ -207,18 +201,18 @@ function omitUndefinedLoadModelOptions(
   if (options.quality !== undefined) {
     nativeOptions.quality = options.quality;
   }
+  if (options.debug !== undefined) {
+    nativeOptions.debug = options.debug;
+  }
 
   return nativeOptions;
 }
 
-async function validateModelPath(
-  path: string,
-  optionName: "modelPath" | "mtpPath"
-): Promise<void> {
+async function validateModelPath(path: string, optionName: "modelPath" | "mtpPath"): Promise<void> {
   if (path.startsWith("~/")) {
     throw new Error(
       `Failed to load DS4 model: ${optionName} uses '~', which is not expanded automatically. ` +
-        `Pass an absolute path instead. Received: ${path}`
+        `Pass an absolute path instead. Received: ${path}`,
     );
   }
 
@@ -227,9 +221,7 @@ async function validateModelPath(
     file = await stat(path);
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(
-        `Failed to load DS4 model: ${optionName} file does not exist at ${path}`
-      );
+      throw new Error(`Failed to load DS4 model: ${optionName} file does not exist at ${path}`);
     }
 
     throw error;
@@ -237,7 +229,7 @@ async function validateModelPath(
 
   if (!file.isFile()) {
     throw new Error(
-      `Failed to load DS4 model: expected ${optionName} to be a file but found a directory at ${path}`
+      `Failed to load DS4 model: expected ${optionName} to be a file but found a directory at ${path}`,
     );
   }
 }
