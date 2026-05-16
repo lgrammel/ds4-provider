@@ -1,5 +1,11 @@
 # @lgrammel/ds4-provider
 
+## 0.0.3
+
+### Patch Changes
+
+- Fix DSML/DSLS tool-call parsing after reasoning output while preserving closed reasoning text.
+
 ## 0.0.2
 
 ### Patch Changes
