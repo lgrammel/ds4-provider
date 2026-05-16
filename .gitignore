@@ -1,0 +1,8 @@
+node_modules
+.pnpm-store
+dist
+build
+packages/ds4-provider/ds4
+**/.env
+.DS_Store
+*.log

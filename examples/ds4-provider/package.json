@@ -1,0 +1,20 @@
+{
+  "name": "@examples/ds4-provider",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "tsx src/generate.ts",
+    "stream": "tsx src/stream.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lgrammel/ds4-provider": "workspace:*",
+    "ai": "7.0.0-canary.130",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.0"
+  }
+}

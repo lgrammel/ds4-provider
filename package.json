@@ -1,0 +1,20 @@
+{
+  "name": "@lgrammel/ds4-provider-monorepo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "build:ts": "pnpm -r build:ts",
+    "clean": "pnpm -r clean",
+    "typecheck": "pnpm -r typecheck",
+    "format:check": "oxfmt --check \"packages/*/src/**/*.ts\" \"examples/**/*.ts\"",
+    "format:fix": "oxfmt --write \"packages/*/src/**/*.ts\" \"examples/**/*.ts\""
+  },
+  "devDependencies": {
+    "oxfmt": "^0.48.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

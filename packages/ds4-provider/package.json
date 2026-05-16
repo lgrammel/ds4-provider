@@ -1,0 +1,54 @@
+{
+  "name": "@lgrammel/ds4-provider",
+  "version": "0.0.0",
+  "description": "DS4 provider for the Vercel AI SDK",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "ds4": {
+    "repo": "https://github.com/antirez/ds4.git",
+    "commit": "312935e15cfe1231468bcb3e259088b02012c2fc"
+  },
+  "files": [
+    "dist",
+    "native",
+    "scripts",
+    "binding.gyp"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.cjs",
+    "build:native": "node-gyp rebuild",
+    "build:ts": "tsc",
+    "build": "pnpm run build:native && pnpm run build:ts",
+    "clean": "rm -rf dist build ds4",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json"
+  },
+  "keywords": [
+    "ai",
+    "ai-sdk",
+    "ds4",
+    "deepseek",
+    "language-model",
+    "vercel"
+  ],
+  "author": "Lars Grammel",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "4.0.0-canary.16",
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.5.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}
