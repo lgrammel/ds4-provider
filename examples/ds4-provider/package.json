@@ -3,13 +3,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "agent": "tsx src/agent.ts",
     "generate": "tsx src/generate.ts",
     "stream": "tsx src/stream.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@lgrammel/agent-tui": "^0.4.6",
     "@lgrammel/ds4-provider": "workspace:*",
-    "ai": "7.0.0-canary.130",
+    "ai": "7.0.0-canary.139",
     "dotenv": "^17.2.3"
   },
   "devDependencies": {

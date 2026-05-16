@@ -14,12 +14,15 @@ importers:
 
   examples/ds4-provider:
     dependencies:
+      '@lgrammel/agent-tui':
+        specifier: ^0.4.6
+        version: 0.4.6(ai@7.0.0-canary.139(zod@4.4.3))(typescript@5.9.3)
       '@lgrammel/ds4-provider':
         specifier: workspace:*
         version: link:../../packages/ds4-provider
       ai:
-        specifier: 7.0.0-canary.130
-        version: 7.0.0-canary.130(zod@4.4.3)
+        specifier: 7.0.0-canary.139
+        version: 7.0.0-canary.139(zod@4.4.3)
       dotenv:
         specifier: ^17.2.3
         version: 17.4.2
@@ -55,14 +58,14 @@ importers:
 
 packages:
 
-  '@ai-sdk/gateway@4.0.0-canary.76':
-    resolution: {integrity: sha512-/39J2bTr6J7uKK4Iu0qWxrrpjAFNTN0wVkJMHpBG//oDS4tsWQyN+c3H+hQ/sQkhR0RFd4uzEbOdzluIrD9CQA==}
+  '@ai-sdk/gateway@4.0.0-canary.82':
+    resolution: {integrity: sha512-zUWm8CTQ5/Amc0P4JN1QBmJZc3HIa+Sz7NbqM2gREVwlYH/gu6vv2e8P6pbHPAsB82/1WexkobOc8JTXgUh+Hw==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider-utils@5.0.0-canary.37':
-    resolution: {integrity: sha512-wkFRxNKbpFNStSIZyDEoWlbcksq4F3oGxudBBQhf8PrNLqIg6PWfkogaUvENmlLQmDI995QET6x9rBCGq4fVrg==}
+  '@ai-sdk/provider-utils@5.0.0-canary.41':
+    resolution: {integrity: sha512-0bNrlQJr+R8QPvoVu/uIsS7K5SZLqVK3dWJoUYAz+z8NWFtB9qWfMADFls1bwXy8m+9HCRW9CmiNNkK79ppQmg==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -235,6 +238,12 @@ packages:
     resolution: {integrity: sha512-wgm9Ehl2jpeqP3zw/7mo3kRHFp5MEDhqAdwy1fTGkHAwnkGOVsgpvQhL8B5n1qlb01jV3n/bI0ZfZp5lWA1k4w==}
     engines: {node: '>=18.0.0'}
 
+  '@lgrammel/agent-tui@0.4.6':
+    resolution: {integrity: sha512-KYFt9zHbSGfSrGYivY7fim1NeJq07QejPyh8uVsgdCXHfKE4gLGAEl009cuajItN/RvxvyIcILQ/7DQTrD/rmw==}
+    peerDependencies:
+      ai: 7.0.0-canary.139
+      typescript: ^5 || ^6
+
   '@npmcli/agent@3.0.0':
     resolution: {integrity: sha512-S79NdEgDQd/NGCay6TCoVzXSj74skRZIKJcpJjC5lOq34SZzyI6MqtiiWoiVWoVrTcGjNeC4ipbh1VIHlpfF5Q==}
     engines: {node: ^18.17.0 || >=20.5.0}
@@ -382,8 +391,8 @@ packages:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
 
-  ai@7.0.0-canary.130:
-    resolution: {integrity: sha512-6jPifjBEyC5Iz6G2zpNCSpNS73pSxFWzH2oVgp7BaTQFG7T+kZC/RXsoggb8j74ra5kYTOUPr5jCt/bZGZv8BA==}
+  ai@7.0.0-canary.139:
+    resolution: {integrity: sha512-GNf3inEDLGkDCHlynVIhPo70mp9ccu88D7w+cTUlZsqEhnIv3K0jSwbQDPrNxFB5mcx11lg3jVAVLn/XY5FZfg==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -758,14 +767,14 @@ packages:
 
 snapshots:
 
-  '@ai-sdk/gateway@4.0.0-canary.76(zod@4.4.3)':
+  '@ai-sdk/gateway@4.0.0-canary.82(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 4.0.0-canary.16
-      '@ai-sdk/provider-utils': 5.0.0-canary.37(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.0-canary.41(zod@4.4.3)
       '@vercel/oidc': 3.2.0
       zod: 4.4.3
 
-  '@ai-sdk/provider-utils@5.0.0-canary.37(zod@4.4.3)':
+  '@ai-sdk/provider-utils@5.0.0-canary.41(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 4.0.0-canary.16
       '@standard-schema/spec': 1.1.0
@@ -868,6 +877,11 @@ snapshots:
     dependencies:
       minipass: 7.1.3
 
+  '@lgrammel/agent-tui@0.4.6(ai@7.0.0-canary.139(zod@4.4.3))(typescript@5.9.3)':
+    dependencies:
+      ai: 7.0.0-canary.139(zod@4.4.3)
+      typescript: 5.9.3
+
   '@npmcli/agent@3.0.0':
     dependencies:
       agent-base: 7.1.4
@@ -956,11 +970,11 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  ai@7.0.0-canary.130(zod@4.4.3):
+  ai@7.0.0-canary.139(zod@4.4.3):
     dependencies:
-      '@ai-sdk/gateway': 4.0.0-canary.76(zod@4.4.3)
+      '@ai-sdk/gateway': 4.0.0-canary.82(zod@4.4.3)
       '@ai-sdk/provider': 4.0.0-canary.16
-      '@ai-sdk/provider-utils': 5.0.0-canary.37(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.0-canary.41(zod@4.4.3)
       zod: 4.4.3
 
   ansi-regex@5.0.1: {}
