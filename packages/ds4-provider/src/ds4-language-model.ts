@@ -13,6 +13,7 @@ import type {
 
 import {
   cancelGeneration,
+  type DS4ReasoningMode,
   generate,
   generateStream,
   loadModel,
@@ -89,7 +90,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
     );
 
     return {
-      content: toTextContent(result.text),
+      content: toContent(result.text, generateOptions.thinkMode !== undefined),
       finishReason: convertFinishReason(result.finishReason),
       usage: convertUsage(result),
       warnings: getWarnings(options),
@@ -108,11 +109,13 @@ export class DS4LanguageModel implements LanguageModelV4 {
     const handle = await this.ensureModelLoaded();
     const generateOptions = this.buildGenerateOptions(options);
     const textId = crypto.randomUUID();
+    const reasoningId = crypto.randomUUID();
     const warnings = getWarnings(options);
     const stream = this.createStream(
       handle,
       generateOptions,
       textId,
+      reasoningId,
       warnings,
       options.abortSignal,
     );
@@ -190,6 +193,10 @@ export class DS4LanguageModel implements LanguageModelV4 {
     if (options.stopSequences?.length) {
       body.stopSequences = options.stopSequences;
     }
+    const thinkMode = getThinkMode(options);
+    if (thinkMode !== "none") {
+      body.thinkMode = thinkMode;
+    }
 
     return body;
   }
@@ -198,12 +205,39 @@ export class DS4LanguageModel implements LanguageModelV4 {
     handle: number,
     generateOptions: GenerateOptions,
     textId: string,
+    reasoningId: string,
     warnings: SharedV4Warning[],
     abortSignal?: AbortSignal,
   ): ReadableStream<LanguageModelV4StreamPart> {
     return new ReadableStream<LanguageModelV4StreamPart>({
       start: async (controller) => {
         let textStarted = false;
+        let reasoningStarted = false;
+        let inReasoning =
+          generateOptions.thinkMode !== undefined && generateOptions.thinkMode !== "none";
+        let parserBuffer = "";
+
+        const emitReasoningDelta = (delta: string) => {
+          if (delta.length === 0) {
+            return;
+          }
+
+          if (!reasoningStarted) {
+            controller.enqueue({ type: "reasoning-start", id: reasoningId });
+            reasoningStarted = true;
+          }
+
+          controller.enqueue({ type: "reasoning-delta", id: reasoningId, delta });
+        };
+
+        const endReasoning = () => {
+          if (!reasoningStarted) {
+            return;
+          }
+
+          controller.enqueue({ type: "reasoning-end", id: reasoningId });
+          reasoningStarted = false;
+        };
 
         const emitTextDelta = (delta: string) => {
           if (delta.length === 0) {
@@ -218,12 +252,59 @@ export class DS4LanguageModel implements LanguageModelV4 {
           controller.enqueue({ type: "text-delta", id: textId, delta });
         };
 
+        const emitParsedDelta = (delta: string, finish = false) => {
+          parserBuffer += delta;
+
+          while (parserBuffer.length > 0) {
+            const openingThinkIndex = parserBuffer.indexOf(THINK_OPEN);
+            const closingThinkIndex = parserBuffer.indexOf(THINK_CLOSE);
+
+            if (!inReasoning) {
+              if (openingThinkIndex === -1) {
+                const safeLength = finish
+                  ? parserBuffer.length
+                  : getSafePrefixLength(parserBuffer, THINK_OPEN);
+                if (safeLength === 0) {
+                  return;
+                }
+                emitTextDelta(parserBuffer.slice(0, safeLength));
+                parserBuffer = parserBuffer.slice(safeLength);
+                continue;
+              }
+
+              emitTextDelta(parserBuffer.slice(0, openingThinkIndex));
+              parserBuffer = parserBuffer.slice(openingThinkIndex + THINK_OPEN.length);
+              inReasoning = true;
+              continue;
+            }
+
+            if (closingThinkIndex === -1) {
+              const safeLength = finish
+                ? parserBuffer.length
+                : getSafePrefixLength(parserBuffer, THINK_CLOSE);
+              if (safeLength === 0) {
+                return;
+              }
+              emitReasoningDelta(parserBuffer.slice(0, safeLength));
+              parserBuffer = parserBuffer.slice(safeLength);
+              continue;
+            }
+
+            emitReasoningDelta(parserBuffer.slice(0, closingThinkIndex));
+            parserBuffer = parserBuffer.slice(closingThinkIndex + THINK_CLOSE.length);
+            inReasoning = false;
+            endReasoning();
+          }
+        };
+
         try {
           controller.enqueue({ type: "stream-start", warnings });
 
           const result = await this.runWithAbortSignal(handle, abortSignal, () =>
-            generateStream(handle, generateOptions, emitTextDelta),
+            generateStream(handle, generateOptions, (delta) => emitParsedDelta(delta)),
           );
+          emitParsedDelta("", true);
+          endReasoning();
 
           if (textStarted) {
             controller.enqueue({ type: "text-end", id: textId });
@@ -315,6 +396,9 @@ export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage
             if (part.type === "text") {
               return part.text;
             }
+            if (part.type === "reasoning") {
+              return `${THINK_OPEN}${part.text}${THINK_CLOSE}`;
+            }
             return "";
           })
           .join("");
@@ -331,18 +415,77 @@ export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage
   return result;
 }
 
-function toTextContent(text: string): LanguageModelV4Content[] {
-  if (text.length === 0) {
-    return [];
+const THINK_OPEN = "<think>";
+const THINK_CLOSE = "</think>";
+
+function toContent(text: string, initialInReasoning = false): LanguageModelV4Content[] {
+  const content: LanguageModelV4Content[] = [];
+  let remaining = text;
+  let inReasoning = initialInReasoning || remaining.startsWith(THINK_OPEN);
+  if (inReasoning) {
+    if (remaining.startsWith(THINK_OPEN)) {
+      remaining = remaining.slice(THINK_OPEN.length);
+    }
   }
 
-  return [
-    {
-      type: "text",
-      text,
-      providerMetadata: undefined,
-    },
-  ];
+  while (remaining.length > 0) {
+    if (inReasoning) {
+      const endIndex = remaining.indexOf(THINK_CLOSE);
+      if (endIndex === -1) {
+        pushContent(content, "reasoning", remaining);
+        break;
+      }
+      pushContent(content, "reasoning", remaining.slice(0, endIndex));
+      remaining = remaining.slice(endIndex + THINK_CLOSE.length);
+      inReasoning = false;
+      continue;
+    }
+
+    const startIndex = remaining.indexOf(THINK_OPEN);
+    if (startIndex === -1) {
+      pushContent(content, "text", remaining);
+      break;
+    }
+    pushContent(content, "text", remaining.slice(0, startIndex));
+    remaining = remaining.slice(startIndex + THINK_OPEN.length);
+    inReasoning = true;
+  }
+
+  return content;
+}
+
+function pushContent(
+  content: LanguageModelV4Content[],
+  type: "text" | "reasoning",
+  text: string,
+): void {
+  if (text.length === 0) {
+    return;
+  }
+
+  content.push(
+    type === "text"
+      ? {
+          type,
+          text,
+          providerMetadata: undefined,
+        }
+      : {
+          type,
+          text,
+          providerMetadata: undefined,
+        },
+  );
+}
+
+function getSafePrefixLength(buffer: string, stopMarker: string): number {
+  const maxOverlap = Math.min(buffer.length, stopMarker.length - 1);
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    if (stopMarker.startsWith(buffer.slice(buffer.length - overlap))) {
+      return buffer.length - overlap;
+    }
+  }
+  return buffer.length;
 }
 
 function convertFinishReason(reason: string | null | undefined): LanguageModelV4FinishReason {
@@ -382,15 +525,25 @@ function getWarnings(options: LanguageModelV4CallOptions): SharedV4Warning[] {
       details: "Tool use is not implemented by this provider yet.",
     });
   }
-  if (options.reasoning && options.reasoning !== "none") {
-    warnings.push({
-      type: "unsupported",
-      feature: "reasoning",
-      details: "Reasoning is not implemented by this provider yet.",
-    });
-  }
 
   return warnings;
+}
+
+function getThinkMode(options: LanguageModelV4CallOptions): DS4ReasoningMode {
+  switch (options.reasoning) {
+    case "none":
+      return "none";
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+      return "high";
+    case "xhigh":
+      return "max";
+    case "provider-default":
+    case undefined:
+      return "high";
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

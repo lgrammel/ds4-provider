@@ -31,6 +31,7 @@ struct GenerateParams {
   float min_p = 0.0f;
   uint64_t seed = 0;
   std::vector<std::string> stop_sequences;
+  ds4_think_mode think_mode = DS4_THINK_NONE;
 };
 
 struct GenerateResult {
@@ -157,15 +158,31 @@ static bool EndsWithStopSequence(const std::string &text,
   return false;
 }
 
-static ds4_tokens BuildPrompt(ModelState *model, const std::vector<ChatMessage> &messages) {
+static ds4_think_mode ParseThinkMode(const std::string &think_mode) {
+  if (think_mode == "high") {
+    return DS4_THINK_HIGH;
+  }
+  if (think_mode == "max") {
+    return DS4_THINK_MAX;
+  }
+  return DS4_THINK_NONE;
+}
+
+static ds4_tokens BuildPrompt(ModelState *model, const std::vector<ChatMessage> &messages,
+                              ds4_think_mode think_mode) {
   ds4_tokens prompt{};
   ds4_chat_begin(model->engine, &prompt);
+
+  ds4_think_mode effective_think_mode = ds4_think_mode_for_context(think_mode, model->ctx_size);
+  if (effective_think_mode == DS4_THINK_MAX) {
+    ds4_chat_append_max_effort_prefix(model->engine, &prompt);
+  }
 
   for (const auto &message : messages) {
     ds4_chat_append_message(model->engine, &prompt, message.role.c_str(), message.content.c_str());
   }
 
-  ds4_chat_append_assistant_prefix(model->engine, &prompt, DS4_THINK_NONE);
+  ds4_chat_append_assistant_prefix(model->engine, &prompt, effective_think_mode);
   return prompt;
 }
 
@@ -176,7 +193,7 @@ static GenerateResult RunGeneration(ModelState *model, const GenerateParams &par
 
   GenerateResult result;
   char err[256] = {0};
-  ds4_tokens prompt = BuildPrompt(model, params.messages);
+  ds4_tokens prompt = BuildPrompt(model, params.messages, params.think_mode);
   result.prompt_tokens = prompt.len;
 
   if (ds4_session_sync(model->session, &prompt, err, sizeof(err)) != 0) {
@@ -280,6 +297,9 @@ static GenerateParams ParseGenerateParams(Napi::Object options) {
     for (uint32_t i = 0; i < stops.Length(); i++) {
       params.stop_sequences.push_back(stops.Get(i).As<Napi::String>().Utf8Value());
     }
+  }
+  if (options.Has("thinkMode") && options.Get("thinkMode").IsString()) {
+    params.think_mode = ParseThinkMode(options.Get("thinkMode").As<Napi::String>().Utf8Value());
   }
 
   return params;

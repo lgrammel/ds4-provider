@@ -30,6 +30,8 @@ export interface ChatMessage {
   content: string;
 }
 
+export type DS4ReasoningMode = "none" | "high" | "max";
+
 export interface GenerateOptions {
   messages: ChatMessage[];
   maxTokens?: number;
@@ -39,6 +41,7 @@ export interface GenerateOptions {
   minP?: number;
   seed?: number;
   stopSequences?: string[];
+  thinkMode?: DS4ReasoningMode;
 }
 
 export interface GenerateResult {
