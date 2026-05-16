@@ -12,7 +12,8 @@
     "@lgrammel/agent-tui": "^0.4.6",
     "@lgrammel/ds4-provider": "workspace:*",
     "ai": "7.0.0-canary.139",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

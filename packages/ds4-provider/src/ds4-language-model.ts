@@ -7,6 +7,7 @@ import type {
   LanguageModelV4Message,
   LanguageModelV4StreamPart,
   LanguageModelV4StreamResult,
+  LanguageModelV4ToolCall,
   LanguageModelV4Usage,
   SharedV4Warning,
 } from "@ai-sdk/provider";
@@ -61,6 +62,21 @@ export interface DS4LanguageModelConfig extends DS4ProviderSettings {
   modelId: string;
 }
 
+interface ToolParseResult {
+  content: LanguageModelV4Content[];
+  finishReason?: LanguageModelV4FinishReason;
+}
+
+type AssistantToolCallPromptPart = Extract<
+  Extract<LanguageModelV4Message, { role: "assistant" }>["content"][number],
+  { type: "tool-call" }
+>;
+
+type ToolResultPromptPart = Extract<
+  Extract<LanguageModelV4Message, { role: "tool" }>["content"][number],
+  { type: "tool-result" }
+>;
+
 export class DS4LanguageModel implements LanguageModelV4 {
   readonly specificationVersion = "v4";
   readonly provider = "ds4";
@@ -89,9 +105,11 @@ export class DS4LanguageModel implements LanguageModelV4 {
       generate(handle, generateOptions),
     );
 
+    const parsed = parseGeneratedContent(result.text, generateOptions.thinkMode !== undefined);
+
     return {
-      content: toContent(result.text, generateOptions.thinkMode !== undefined),
-      finishReason: convertFinishReason(result.finishReason),
+      content: parsed.content,
+      finishReason: parsed.finishReason ?? convertFinishReason(result.finishReason),
       usage: convertUsage(result),
       warnings: getWarnings(options),
       request: {
@@ -117,7 +135,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
       textId,
       reasoningId,
       warnings,
-      options.abortSignal,
+      options,
     );
 
     return {
@@ -169,7 +187,7 @@ export class DS4LanguageModel implements LanguageModelV4 {
 
   private buildGenerateOptions(options: LanguageModelV4CallOptions): GenerateOptions {
     const body: GenerateOptions = {
-      messages: convertMessages(options.prompt),
+      messages: convertMessages(options.prompt, options),
     };
 
     if (options.maxOutputTokens !== undefined) {
@@ -207,10 +225,12 @@ export class DS4LanguageModel implements LanguageModelV4 {
     textId: string,
     reasoningId: string,
     warnings: SharedV4Warning[],
-    abortSignal?: AbortSignal,
+    options: LanguageModelV4CallOptions,
   ): ReadableStream<LanguageModelV4StreamPart> {
     return new ReadableStream<LanguageModelV4StreamPart>({
       start: async (controller) => {
+        let generatedText = "";
+        const bufferOutput = shouldParseToolOutput(options);
         let textStarted = false;
         let reasoningStarted = false;
         let inReasoning =
@@ -300,19 +320,34 @@ export class DS4LanguageModel implements LanguageModelV4 {
         try {
           controller.enqueue({ type: "stream-start", warnings });
 
-          const result = await this.runWithAbortSignal(handle, abortSignal, () =>
-            generateStream(handle, generateOptions, (delta) => emitParsedDelta(delta)),
+          const result = await this.runWithAbortSignal(handle, options.abortSignal, () =>
+            generateStream(handle, generateOptions, (delta) => {
+              generatedText += delta;
+              if (!bufferOutput) {
+                emitParsedDelta(delta);
+              }
+            }),
           );
-          emitParsedDelta("", true);
-          endReasoning();
 
-          if (textStarted) {
-            controller.enqueue({ type: "text-end", id: textId });
+          const parsed = parseGeneratedContent(
+            generatedText,
+            generateOptions.thinkMode !== undefined,
+          );
+
+          if (bufferOutput) {
+            enqueueContentParts(controller, parsed.content);
+          } else {
+            emitParsedDelta("", true);
+            endReasoning();
+
+            if (textStarted) {
+              controller.enqueue({ type: "text-end", id: textId });
+            }
           }
 
           controller.enqueue({
             type: "finish",
-            finishReason: convertFinishReason(result.finishReason),
+            finishReason: parsed.finishReason ?? convertFinishReason(result.finishReason),
             usage: convertUsage(result),
           });
           controller.close();
@@ -369,8 +404,16 @@ export class DS4LanguageModel implements LanguageModelV4 {
   }
 }
 
-export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage[] {
+export function convertMessages(
+  messages: LanguageModelV4Message[],
+  options: Pick<LanguageModelV4CallOptions, "toolChoice" | "tools"> = {},
+): ChatMessage[] {
   const result: ChatMessage[] = [];
+  const toolInstructions = formatToolInstructions(options);
+
+  if (toolInstructions) {
+    result.push({ role: "system", content: toolInstructions });
+  }
 
   for (const message of messages) {
     switch (message.role) {
@@ -399,6 +442,9 @@ export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage
             if (part.type === "reasoning") {
               return `${THINK_OPEN}${part.text}${THINK_CLOSE}`;
             }
+            if (part.type === "tool-call") {
+              return formatAssistantToolCall(part);
+            }
             return "";
           })
           .join("");
@@ -407,8 +453,13 @@ export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage
         }
         break;
       }
-      case "tool":
+      case "tool": {
+        const content = message.content.map(formatToolResult).join("\n\n");
+        if (content.length > 0) {
+          result.push({ role: "user", content });
+        }
         break;
+      }
     }
   }
 
@@ -417,6 +468,10 @@ export function convertMessages(messages: LanguageModelV4Message[]): ChatMessage
 
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
+const TOOL_CALL_OPEN = "<tool_call>";
+const TOOL_CALL_CLOSE = "</tool_call>";
+const TOOL_RESULT_OPEN = "<tool_result>";
+const TOOL_RESULT_CLOSE = "</tool_result>";
 
 function toContent(text: string, initialInReasoning = false): LanguageModelV4Content[] {
   const content: LanguageModelV4Content[] = [];
@@ -441,14 +496,34 @@ function toContent(text: string, initialInReasoning = false): LanguageModelV4Con
       continue;
     }
 
-    const startIndex = remaining.indexOf(THINK_OPEN);
+    const startIndex = findFirstMarkerIndex(remaining, [THINK_OPEN, TOOL_CALL_OPEN]);
     if (startIndex === -1) {
       pushContent(content, "text", remaining);
       break;
     }
     pushContent(content, "text", remaining.slice(0, startIndex));
-    remaining = remaining.slice(startIndex + THINK_OPEN.length);
-    inReasoning = true;
+    if (remaining.startsWith(TOOL_CALL_OPEN, startIndex)) {
+      remaining = remaining.slice(startIndex + TOOL_CALL_OPEN.length);
+      const endIndex = remaining.indexOf(TOOL_CALL_CLOSE);
+      if (endIndex === -1) {
+        pushContent(content, "text", `${TOOL_CALL_OPEN}${remaining}`);
+        break;
+      }
+      const toolCall = parseToolCall(remaining.slice(0, endIndex));
+      if (toolCall) {
+        content.push(toolCall);
+      } else {
+        pushContent(
+          content,
+          "text",
+          `${TOOL_CALL_OPEN}${remaining.slice(0, endIndex)}${TOOL_CALL_CLOSE}`,
+        );
+      }
+      remaining = remaining.slice(endIndex + TOOL_CALL_CLOSE.length);
+    } else {
+      remaining = remaining.slice(startIndex + THINK_OPEN.length);
+      inReasoning = true;
+    }
   }
 
   return content;
@@ -476,6 +551,181 @@ function pushContent(
           providerMetadata: undefined,
         },
   );
+}
+
+function parseGeneratedContent(text: string, initialInReasoning = false): ToolParseResult {
+  const content = toContent(text, initialInReasoning);
+  const hasToolCall = content.some((part) => part.type === "tool-call");
+
+  return {
+    content,
+    finishReason: hasToolCall ? { unified: "tool-calls", raw: "tool-calls" } : undefined,
+  };
+}
+
+function enqueueContentParts(
+  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
+  content: LanguageModelV4Content[],
+): void {
+  for (const part of content) {
+    switch (part.type) {
+      case "text": {
+        const id = crypto.randomUUID();
+        controller.enqueue({ type: "text-start", id });
+        controller.enqueue({ type: "text-delta", id, delta: part.text });
+        controller.enqueue({ type: "text-end", id });
+        break;
+      }
+      case "reasoning": {
+        const id = crypto.randomUUID();
+        controller.enqueue({ type: "reasoning-start", id });
+        controller.enqueue({ type: "reasoning-delta", id, delta: part.text });
+        controller.enqueue({ type: "reasoning-end", id });
+        break;
+      }
+      case "tool-call":
+        controller.enqueue(part);
+        break;
+    }
+  }
+}
+
+function shouldParseToolOutput(options: Pick<LanguageModelV4CallOptions, "tools">): boolean {
+  return options.tools?.some((tool) => tool.type === "function") ?? false;
+}
+
+function formatToolInstructions(
+  options: Pick<LanguageModelV4CallOptions, "toolChoice" | "tools">,
+): string | undefined {
+  const tools = options.tools?.filter((tool) => tool.type === "function") ?? [];
+  if (tools.length === 0) {
+    return undefined;
+  }
+
+  const toolChoice = options.toolChoice ?? { type: "auto" as const };
+  const toolChoiceInstruction =
+    toolChoice.type === "none"
+      ? "Do not call any tools for this response."
+      : toolChoice.type === "required"
+        ? "You must call one of the available tools."
+        : toolChoice.type === "tool"
+          ? `You must call the ${JSON.stringify(toolChoice.toolName)} tool.`
+          : "Call a tool only when it is needed to answer the user.";
+
+  return [
+    "You can call tools by writing exactly one XML block with a JSON payload:",
+    `${TOOL_CALL_OPEN}{"name":"tool_name","arguments":{"key":"value"}}${TOOL_CALL_CLOSE}`,
+    "When you call a tool, do not add any other text after the tool call.",
+    "Available tools:",
+    JSON.stringify(
+      tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      })),
+    ),
+    toolChoiceInstruction,
+  ].join("\n");
+}
+
+function formatAssistantToolCall(part: AssistantToolCallPromptPart): string {
+  return `${TOOL_CALL_OPEN}${JSON.stringify({
+    id: part.toolCallId,
+    name: part.toolName,
+    arguments: part.input,
+  })}${TOOL_CALL_CLOSE}`;
+}
+
+function formatToolResult(
+  part: Extract<LanguageModelV4Message, { role: "tool" }>["content"][number],
+): string {
+  if (part.type !== "tool-result") {
+    return "";
+  }
+
+  return `${TOOL_RESULT_OPEN}${JSON.stringify({
+    id: part.toolCallId,
+    name: part.toolName,
+    result: formatToolResultOutput(part.output),
+  })}${TOOL_RESULT_CLOSE}`;
+}
+
+function formatToolResultOutput(part: ToolResultPromptPart["output"]): unknown {
+  switch (part.type) {
+    case "text":
+    case "json":
+    case "error-text":
+    case "error-json":
+      return part.value;
+    case "execution-denied":
+      return { error: "execution-denied", reason: part.reason };
+    case "content":
+      return part.value.map((content) => {
+        switch (content.type) {
+          case "text":
+            return { type: "text", text: content.text };
+          case "file":
+            return {
+              type: "file",
+              mediaType: content.mediaType,
+              filename: content.filename,
+            };
+          case "custom":
+            return { type: "custom" };
+        }
+      });
+  }
+}
+
+function parseToolCall(text: string): LanguageModelV4ToolCall | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.trim());
+  } catch {
+    return undefined;
+  }
+
+  if (!isRecord(parsed)) {
+    return undefined;
+  }
+
+  const name = typeof parsed.name === "string" ? parsed.name : parsed.toolName;
+  if (typeof name !== "string") {
+    return undefined;
+  }
+
+  const input = "arguments" in parsed ? parsed.arguments : parsed.input;
+  return {
+    type: "tool-call",
+    toolCallId: typeof parsed.id === "string" ? parsed.id : crypto.randomUUID(),
+    toolName: name,
+    input: stringifyToolInput(input),
+  };
+}
+
+function stringifyToolInput(input: unknown): string {
+  if (input === undefined) {
+    return "{}";
+  }
+  if (typeof input === "string") {
+    return input;
+  }
+  return JSON.stringify(input) ?? "{}";
+}
+
+function findFirstMarkerIndex(text: string, markers: string[]): number {
+  let firstIndex = -1;
+  for (const marker of markers) {
+    const markerIndex = text.indexOf(marker);
+    if (markerIndex !== -1 && (firstIndex === -1 || markerIndex < firstIndex)) {
+      firstIndex = markerIndex;
+    }
+  }
+  return firstIndex;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function getSafePrefixLength(buffer: string, stopMarker: string): number {
@@ -518,11 +768,19 @@ function convertUsage(result: GenerateResult | undefined): LanguageModelV4Usage 
 function getWarnings(options: LanguageModelV4CallOptions): SharedV4Warning[] {
   const warnings: SharedV4Warning[] = [];
 
-  if (options.tools?.length) {
+  if (options.tools?.some((tool) => tool.type === "function")) {
+    warnings.push({
+      type: "compatibility",
+      feature: "tools",
+      details: "DS4 tool calls use prompt instructions and parsed XML tool call blocks.",
+    });
+  }
+
+  if (options.tools?.some((tool) => tool.type === "provider")) {
     warnings.push({
       type: "unsupported",
-      feature: "tools",
-      details: "Tool use is not implemented by this provider yet.",
+      feature: "provider tools",
+      details: "DS4 only supports client-executed function tools.",
     });
   }
 

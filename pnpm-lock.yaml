@@ -26,6 +26,9 @@ importers:
       dotenv:
         specifier: ^17.2.3
         version: 17.4.2
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^20.10.0
