@@ -13,9 +13,11 @@ import {
   convertMessages,
   parseGeneratedContent,
 } from "../src/ds4-language-model.js";
+import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ds4 } from "../src/ds4-provider.js";
 import {
   generate,
+  generateStream,
   loadModel,
   unloadModel,
   type GenerateOptions,
@@ -69,9 +71,7 @@ describe("parseGeneratedContent", () => {
 
     expect(parsed.toolCalls).toHaveLength(0);
     expect(parsed.content[0]).toMatchObject({ type: "reasoning", text: "need a tool" });
-    expect(parsed.content[1]?.type === "text" ? parsed.content[1].text : "").toMatch(
-      /tool_calls/,
-    );
+    expect(parsed.content[1]?.type === "text" ? parsed.content[1].text : "").toMatch(/tool_calls/);
   });
 
   it("parses DSML blocks with DSLS invoke tags and empty object parameters", () => {
@@ -131,7 +131,7 @@ describe("convertMessages", () => {
             { type: "text", text: "describe this " },
             {
               type: "file",
-              data: new Uint8Array([1, 2, 3]),
+              data: { type: "data", data: new Uint8Array([1, 2, 3]) },
               filename: "image.png",
               mediaType: "image/png",
             },
@@ -195,6 +195,7 @@ describe("DS4 provider", () => {
   beforeEach(() => {
     vi.mocked(loadModel).mockReset();
     vi.mocked(generate).mockReset();
+    vi.mocked(generateStream).mockReset();
     vi.mocked(unloadModel).mockReset();
   });
 
@@ -272,4 +273,209 @@ describe("DS4 provider", () => {
 
     expect(unloadModel).toHaveBeenCalledWith(7);
   });
+
+  it("streams reasoning incrementally when tools are enabled", async () => {
+    vi.mocked(loadModel).mockResolvedValue(42);
+    vi.mocked(generateStream).mockImplementation(async (_handle, _options, onToken) => {
+      for (const token of [
+        "thinking",
+        " about",
+        "</think>",
+        dsmlToolCall.slice(0, 20),
+        dsmlToolCall.slice(20),
+      ]) {
+        onToken(token);
+      }
+      return {
+        text: `thinking about</think>${dsmlToolCall}`,
+        promptTokens: 3,
+        completionTokens: 5,
+        finishReason: "stop",
+      };
+    });
+
+    const model = ds4({ modelPath: "/models/ds4.gguf" });
+    const result = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "bash",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+
+    const parts = await collectStreamParts(result.stream);
+    const reasoningDeltas = parts
+      .filter((part) => part.type === "reasoning-delta")
+      .map((part) => part.delta);
+
+    expect(reasoningDeltas.length).toBeGreaterThan(1);
+    expect(reasoningDeltas.join("")).toBe("thinking about");
+    expect(parts.findIndex((part) => part.type === "reasoning-delta")).toBeLessThan(
+      parts.findIndex((part) => part.type === "tool-input-start"),
+    );
+    expect(parts.some((part) => part.type === "tool-call")).toBe(true);
+  });
+
+  it("streams AI SDK tool input parts from DSML parameters", async () => {
+    vi.mocked(loadModel).mockResolvedValue(42);
+    vi.mocked(generateStream).mockImplementation(async (_handle, _options, onToken) => {
+      for (const token of ["need a tool</think>", dsmlToolCall]) {
+        onToken(token);
+      }
+      return {
+        text: `need a tool</think>${dsmlToolCall}`,
+        promptTokens: 3,
+        completionTokens: 2,
+        finishReason: "stop",
+      };
+    });
+
+    const model = ds4({ modelPath: "/models/ds4.gguf" });
+    const result = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "bash",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+
+    const parts = await collectStreamParts(result.stream);
+    const toolStart = parts.find((part) => part.type === "tool-input-start");
+    expect(toolStart).toMatchObject({ type: "tool-input-start", toolName: "bash" });
+
+    const toolInput = parts
+      .filter((part) => part.type === "tool-input-delta")
+      .map((part) => part.delta)
+      .join("");
+    expect(JSON.parse(toolInput)).toEqual({
+      command: "cd /tmp && git diff 2>/dev/null",
+      timeout: 10,
+    });
+
+    const toolCall = parts.find((part) => part.type === "tool-call");
+    expect(toolCall).toMatchObject({
+      type: "tool-call",
+      toolCallId: toolStart?.type === "tool-input-start" ? toolStart.id : undefined,
+      toolName: "bash",
+    });
+  });
+
+  it("holds partial think and tool markers until they are safe", async () => {
+    vi.mocked(loadModel).mockResolvedValue(42);
+    vi.mocked(generateStream).mockImplementation(async (_handle, _options, onToken) => {
+      for (const token of [
+        "reasoning</thi",
+        "nk>\n\n<｜DS",
+        "ML｜tool_calls>",
+        "</｜DSML｜tool_calls>",
+      ]) {
+        onToken(token);
+      }
+      return {
+        text: "reasoning</think>\n\n<｜DSML｜tool_calls></｜DSML｜tool_calls>",
+        promptTokens: 3,
+        completionTokens: 4,
+        finishReason: "stop",
+      };
+    });
+
+    const model = ds4({ modelPath: "/models/ds4.gguf" });
+    const result = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "noop",
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+
+    const parts = await collectStreamParts(result.stream);
+    expect(
+      parts
+        .filter((part) => part.type === "reasoning-delta")
+        .map((part) => part.delta)
+        .join(""),
+    ).toBe("reasoning");
+    expect(parts.some((part) => part.type === "text-delta")).toBe(false);
+  });
+
+  it("does not stream stop sequence tails", async () => {
+    vi.mocked(loadModel).mockResolvedValue(42);
+    vi.mocked(generateStream).mockImplementation(async (_handle, _options, onToken) => {
+      for (const token of ["hel", "lo", "END"]) {
+        onToken(token);
+      }
+      return {
+        text: "hello",
+        promptTokens: 3,
+        completionTokens: 3,
+        finishReason: "stop",
+      };
+    });
+
+    const model = ds4({ modelPath: "/models/ds4.gguf" });
+    const result = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      reasoning: "none",
+      stopSequences: ["END"],
+    });
+
+    const parts = await collectStreamParts(result.stream);
+    expect(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.delta)
+        .join(""),
+    ).toBe("hello");
+  });
+
+  it("holds partial UTF-16 surrogate pairs across text deltas", async () => {
+    vi.mocked(loadModel).mockResolvedValue(42);
+    vi.mocked(generateStream).mockImplementation(async (_handle, _options, onToken) => {
+      for (const token of ["smile ", "\ud83d", "\ude00"]) {
+        onToken(token);
+      }
+      return {
+        text: "smile 😀",
+        promptTokens: 3,
+        completionTokens: 3,
+        finishReason: "stop",
+      };
+    });
+
+    const model = ds4({ modelPath: "/models/ds4.gguf" });
+    const result = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      reasoning: "none",
+    });
+
+    const parts = await collectStreamParts(result.stream);
+    expect(
+      parts
+        .filter((part) => part.type === "text-delta")
+        .map((part) => part.delta)
+        .join(""),
+    ).toBe("smile 😀");
+    expect(
+      parts.filter((part) => part.type === "text-delta").map((part) => part.delta),
+    ).not.toContain("\ud83d");
+  });
 });
+
+async function collectStreamParts(
+  stream: ReadableStream<LanguageModelV4StreamPart>,
+): Promise<LanguageModelV4StreamPart[]> {
+  const parts: LanguageModelV4StreamPart[] = [];
+  for await (const part of stream) {
+    parts.push(part);
+  }
+  return parts;
+}

@@ -24,6 +24,7 @@ import {
   type GenerateResult,
   type LoadModelOptions,
 } from "./native-binding.js";
+import { DS4StreamProjector } from "./ds4-stream-projector.js";
 
 export interface DS4ProviderSettings {
   /**
@@ -235,92 +236,15 @@ export class DS4LanguageModel implements LanguageModelV4 {
     return new ReadableStream<LanguageModelV4StreamPart>({
       start: async (controller) => {
         let generatedText = "";
-        const bufferOutput = shouldParseToolOutput(options);
-        let textStarted = false;
-        let reasoningStarted = false;
-        let inReasoning =
-          generateOptions.thinkMode !== undefined && generateOptions.thinkMode !== "none";
-        let parserBuffer = "";
-
-        const emitReasoningDelta = (delta: string) => {
-          if (delta.length === 0) {
-            return;
-          }
-
-          if (!reasoningStarted) {
-            controller.enqueue({ type: "reasoning-start", id: reasoningId });
-            reasoningStarted = true;
-          }
-
-          controller.enqueue({ type: "reasoning-delta", id: reasoningId, delta });
-        };
-
-        const endReasoning = () => {
-          if (!reasoningStarted) {
-            return;
-          }
-
-          controller.enqueue({ type: "reasoning-end", id: reasoningId });
-          reasoningStarted = false;
-        };
-
-        const emitTextDelta = (delta: string) => {
-          if (delta.length === 0) {
-            return;
-          }
-
-          if (!textStarted) {
-            controller.enqueue({ type: "text-start", id: textId });
-            textStarted = true;
-          }
-
-          controller.enqueue({ type: "text-delta", id: textId, delta });
-        };
-
-        const emitParsedDelta = (delta: string, finish = false) => {
-          parserBuffer += delta;
-
-          while (parserBuffer.length > 0) {
-            const openingThinkIndex = parserBuffer.indexOf(THINK_OPEN);
-            const closingThinkIndex = parserBuffer.indexOf(THINK_CLOSE);
-
-            if (!inReasoning) {
-              if (openingThinkIndex === -1) {
-                const safeLength = finish
-                  ? parserBuffer.length
-                  : getSafePrefixLength(parserBuffer, THINK_OPEN);
-                if (safeLength === 0) {
-                  return;
-                }
-                emitTextDelta(parserBuffer.slice(0, safeLength));
-                parserBuffer = parserBuffer.slice(safeLength);
-                continue;
-              }
-
-              emitTextDelta(parserBuffer.slice(0, openingThinkIndex));
-              parserBuffer = parserBuffer.slice(openingThinkIndex + THINK_OPEN.length);
-              inReasoning = true;
-              continue;
-            }
-
-            if (closingThinkIndex === -1) {
-              const safeLength = finish
-                ? parserBuffer.length
-                : getSafePrefixLength(parserBuffer, THINK_CLOSE);
-              if (safeLength === 0) {
-                return;
-              }
-              emitReasoningDelta(parserBuffer.slice(0, safeLength));
-              parserBuffer = parserBuffer.slice(safeLength);
-              continue;
-            }
-
-            emitReasoningDelta(parserBuffer.slice(0, closingThinkIndex));
-            parserBuffer = parserBuffer.slice(closingThinkIndex + THINK_CLOSE.length);
-            inReasoning = false;
-            endReasoning();
-          }
-        };
+        const hasTools = shouldParseToolOutput(options);
+        const projector = new DS4StreamProjector({
+          textId,
+          reasoningId,
+          initialInReasoning:
+            generateOptions.thinkMode !== undefined && generateOptions.thinkMode !== "none",
+          hasTools,
+          stopSequences: generateOptions.stopSequences,
+        });
 
         try {
           controller.enqueue({ type: "stream-start", warnings });
@@ -328,30 +252,32 @@ export class DS4LanguageModel implements LanguageModelV4 {
           const result = await this.runWithAbortSignal(handle, options.abortSignal, () =>
             generateStream(handle, generateOptions, (delta) => {
               generatedText += delta;
-              if (bufferOutput && isCompleteDsmlToolCall(generatedText, generateOptions)) {
+              if (hasTools && isCompleteDsmlToolCall(generatedText, generateOptions)) {
                 cancelGeneration(handle);
               }
-              if (!bufferOutput) {
-                emitParsedDelta(delta);
+              for (const part of projector.update(generatedText)) {
+                controller.enqueue(part);
               }
             }),
           );
 
+          generatedText = result.text;
+          for (const part of projector.update(generatedText, true)) {
+            controller.enqueue(part);
+          }
+          for (const part of projector.finish()) {
+            controller.enqueue(part);
+          }
+
           const parsed = parseGeneratedContent(
             generatedText,
             generateOptions.thinkMode !== undefined,
+            projector.getToolCallIds(),
           );
           this.rememberToolCalls(parsed);
 
-          if (bufferOutput) {
-            enqueueContentParts(controller, parsed.content);
-          } else {
-            emitParsedDelta("", true);
-            endReasoning();
-
-            if (textStarted) {
-              controller.enqueue({ type: "text-end", id: textId });
-            }
+          for (const toolCall of parsed.toolCalls) {
+            controller.enqueue(toolCall);
           }
 
           controller.enqueue({
@@ -605,16 +531,20 @@ function pushContent(
   );
 }
 
-export function parseGeneratedContent(text: string, initialInReasoning = false): ToolParseResult {
+export function parseGeneratedContent(
+  text: string,
+  initialInReasoning = false,
+  toolCallIds: string[] = [],
+): ToolParseResult {
   const parsed = parseGeneratedMessage(text, initialInReasoning);
   const content: LanguageModelV4Content[] = [];
   pushContent(content, "reasoning", parsed.reasoningText ?? "");
   pushContent(content, "text", parsed.contentText);
 
   const toolCalls = parsed.calls.map(
-    (call): LanguageModelV4ToolCall => ({
+    (call, index): LanguageModelV4ToolCall => ({
       type: "tool-call",
-      toolCallId: crypto.randomUUID(),
+      toolCallId: toolCallIds[index] ?? crypto.randomUUID(),
       toolName: call.toolName,
       input: call.input,
     }),
@@ -648,33 +578,6 @@ function isCompleteDsmlToolCall(text: string, generateOptions: GenerateOptions):
     (syntax) =>
       text.indexOf(syntax.toolCallsClose, found.start + syntax.toolCallsOpen.length) !== -1,
   );
-}
-
-function enqueueContentParts(
-  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
-  content: LanguageModelV4Content[],
-): void {
-  for (const part of content) {
-    switch (part.type) {
-      case "text": {
-        const id = crypto.randomUUID();
-        controller.enqueue({ type: "text-start", id });
-        controller.enqueue({ type: "text-delta", id, delta: part.text });
-        controller.enqueue({ type: "text-end", id });
-        break;
-      }
-      case "reasoning": {
-        const id = crypto.randomUUID();
-        controller.enqueue({ type: "reasoning-start", id });
-        controller.enqueue({ type: "reasoning-delta", id, delta: part.text });
-        controller.enqueue({ type: "reasoning-end", id });
-        break;
-      }
-      case "tool-call":
-        controller.enqueue(part);
-        break;
-    }
-  }
 }
 
 function shouldParseToolOutput(options: Pick<LanguageModelV4CallOptions, "tools">): boolean {
@@ -1167,16 +1070,6 @@ function stringifyToolInput(input: unknown): string {
     return input;
   }
   return JSON.stringify(input) ?? "{}";
-}
-
-function getSafePrefixLength(buffer: string, stopMarker: string): number {
-  const maxOverlap = Math.min(buffer.length, stopMarker.length - 1);
-  for (let overlap = maxOverlap; overlap > 0; overlap--) {
-    if (stopMarker.startsWith(buffer.slice(buffer.length - overlap))) {
-      return buffer.length - overlap;
-    }
-  }
-  return buffer.length;
 }
 
 function convertFinishReason(reason: string | null | undefined): LanguageModelV4FinishReason {
