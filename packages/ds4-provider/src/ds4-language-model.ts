@@ -488,6 +488,7 @@ export function convertMessages(
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 const DSML = "｜DSML｜";
+const DSLS = "｜DSLS｜";
 const DSML_SHORT = "DSML｜";
 const DSML_TOOL_CALLS_OPEN = `<${DSML}tool_calls>`;
 const DSML_TOOL_CALLS_CLOSE = `</${DSML}tool_calls>`;
@@ -495,6 +496,12 @@ const DSML_INVOKE_OPEN = `<${DSML}invoke`;
 const DSML_INVOKE_CLOSE = `</${DSML}invoke>`;
 const DSML_PARAMETER_OPEN = `<${DSML}parameter`;
 const DSML_PARAMETER_CLOSE = `</${DSML}parameter>`;
+const DSLS_TOOL_CALLS_OPEN = `<${DSLS}tool_calls>`;
+const DSLS_TOOL_CALLS_CLOSE = `</${DSLS}tool_calls>`;
+const DSLS_INVOKE_OPEN = `<${DSLS}invoke`;
+const DSLS_INVOKE_CLOSE = `</${DSLS}invoke>`;
+const DSLS_PARAMETER_OPEN = `<${DSLS}parameter`;
+const DSLS_PARAMETER_CLOSE = `</${DSLS}parameter>`;
 const DSML_TOOL_CALLS_OPEN_SHORT = `<${DSML_SHORT}tool_calls>`;
 const DSML_TOOL_CALLS_CLOSE_SHORT = `</${DSML_SHORT}tool_calls>`;
 const DSML_INVOKE_OPEN_SHORT = `<${DSML_SHORT}invoke`;
@@ -539,6 +546,22 @@ const DSML_SYNTAXES: DsmlSyntax[] = [
     invokeClose: DSML_INVOKE_CLOSE,
     parameterOpen: DSML_PARAMETER_OPEN,
     parameterClose: DSML_PARAMETER_CLOSE,
+  },
+  {
+    toolCallsOpen: DSML_TOOL_CALLS_OPEN,
+    toolCallsClose: DSML_TOOL_CALLS_CLOSE,
+    invokeOpen: DSLS_INVOKE_OPEN,
+    invokeClose: DSLS_INVOKE_CLOSE,
+    parameterOpen: DSLS_PARAMETER_OPEN,
+    parameterClose: DSLS_PARAMETER_CLOSE,
+  },
+  {
+    toolCallsOpen: DSLS_TOOL_CALLS_OPEN,
+    toolCallsClose: DSLS_TOOL_CALLS_CLOSE,
+    invokeOpen: DSLS_INVOKE_OPEN,
+    invokeClose: DSLS_INVOKE_CLOSE,
+    parameterOpen: DSLS_PARAMETER_OPEN,
+    parameterClose: DSLS_PARAMETER_CLOSE,
   },
   {
     toolCallsOpen: DSML_TOOL_CALLS_OPEN_SHORT,
@@ -621,9 +644,9 @@ function isCompleteDsmlToolCall(text: string, generateOptions: GenerateOptions):
     return false;
   }
 
-  return (
-    text.indexOf(found.syntax.toolCallsClose, found.start + found.syntax.toolCallsOpen.length) !==
-    -1
+  return found.syntaxes.some(
+    (syntax) =>
+      text.indexOf(syntax.toolCallsClose, found.start + syntax.toolCallsOpen.length) !== -1,
   );
 }
 
@@ -873,7 +896,13 @@ function parseGeneratedMessage(text: string, requireThinkingClosed: boolean): Ds
   const parsedPrefix: LanguageModelV4Content[] = [];
   pushReasoningAndText(parsedPrefix, beforeTool, requireThinkingClosed);
 
-  const parsedTool = parseDsmlToolCalls(source, found.start, found.syntax);
+  let parsedTool: { calls: DsmlToolCall[]; rawDsml: string } | undefined;
+  for (const syntax of found.syntaxes) {
+    parsedTool = parseDsmlToolCalls(source, found.start, syntax);
+    if (parsedTool) {
+      break;
+    }
+  }
   if (!parsedTool) {
     return {
       contentText: source,
@@ -946,12 +975,17 @@ function pushReasoningAndText(
 function findDsmlToolStart(
   text: string,
   fromIndex: number,
-): { start: number; syntax: DsmlSyntax } | undefined {
-  let best: { start: number; syntax: DsmlSyntax } | undefined;
+): { start: number; syntaxes: DsmlSyntax[] } | undefined {
+  let best: { start: number; syntaxes: DsmlSyntax[] } | undefined;
   for (const syntax of DSML_SYNTAXES) {
     const index = text.indexOf(syntax.toolCallsOpen, fromIndex);
-    if (index !== -1 && (!best || index < best.start)) {
-      best = { start: index, syntax };
+    if (index === -1) {
+      continue;
+    }
+    if (!best || index < best.start) {
+      best = { start: index, syntaxes: [syntax] };
+    } else if (index === best.start) {
+      best.syntaxes.push(syntax);
     }
   }
   return best;
@@ -1007,7 +1041,15 @@ function parseDsmlToolCalls(
       if (!parsedParam) {
         return undefined;
       }
-      args[parsedParam.name] = parsedParam.value;
+      if (parsedParam.name === "") {
+        if (isJsonObject(parsedParam.value)) {
+          Object.assign(args, parsedParam.value);
+        } else {
+          args.arguments = parsedParam.value;
+        }
+      } else {
+        args[parsedParam.name] = parsedParam.value;
+      }
       index = parsedParam.end;
     }
   }
@@ -1031,7 +1073,7 @@ function parseDsmlParameter(
 
   const tag = text.slice(start, tagEnd + 1);
   const name = parseXmlAttribute(tag, "name");
-  if (!name) {
+  if (name === null) {
     return undefined;
   }
   const stringAttribute = parseXmlAttribute(tag, "string");
@@ -1052,9 +1094,11 @@ function parseDsmlParameter(
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
   const parsed = parseJsonValue(text);
-  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : undefined;
+  return isJsonObject(parsed) ? parsed : undefined;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseJsonValue(text: string): unknown {

@@ -53,6 +53,39 @@ describe("parseGeneratedContent", () => {
     expect(parsed.content[0]?.type).toBe("reasoning");
   });
 
+  it("parses tool calls after closed initial reasoning", () => {
+    const parsed = parseGeneratedContent(`need a tool</think>${dsmlToolCall}`, true);
+
+    expect(parsed.finishReason?.unified).toBe("tool-calls");
+    expect(parsed.content[0]).toMatchObject({ type: "reasoning", text: "need a tool" });
+    expect(parsed.toolCalls).toHaveLength(1);
+  });
+
+  it("parses DSML blocks with DSLS invoke tags and empty object parameters", () => {
+    const parsed = parseGeneratedContent(
+      "I need current info.</think>\n\n" +
+        "<｜DSML｜tool_calls>\n" +
+        '<｜DSLS｜invoke name="currentDate">\n' +
+        '<｜DSLS｜parameter name="" string="false">{}</｜DSLS｜parameter>\n' +
+        "</｜DSLS｜invoke>\n" +
+        '<｜DSLS｜invoke name="webSearch">\n' +
+        '<｜DSLS｜parameter name="query" string="true">Berlin news yesterday</｜DSLS｜parameter>\n' +
+        "</｜DSLS｜invoke>\n" +
+        "</｜DSML｜tool_calls>",
+      true,
+    );
+
+    expect(parsed.finishReason?.unified).toBe("tool-calls");
+    expect(parsed.toolCalls.map((toolCall) => toolCall.toolName)).toEqual([
+      "currentDate",
+      "webSearch",
+    ]);
+    expect(JSON.parse(parsed.toolCalls[0]?.input ?? "")).toEqual({});
+    expect(JSON.parse(parsed.toolCalls[1]?.input ?? "")).toEqual({
+      query: "Berlin news yesterday",
+    });
+  });
+
   it("keeps invalid DSML output as text", () => {
     const parsed = parseGeneratedContent(
       `thinking${dsmlToolCall.replace('name="bash"', "")}`,
