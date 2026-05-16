@@ -38,7 +38,9 @@
     "build:ts": "tsc",
     "build": "pnpm run vendor:ds4 && pnpm run build:native && pnpm run build:ts",
     "clean": "rm -rf dist build",
-    "test": "tsx test/ds4-language-model.test.ts",
+    "test": "pnpm run test:js && pnpm run test:native",
+    "test:js": "vitest run",
+    "test:native": "pnpm run vendor:ds4 && mkdir -p build/test && c++ -std=c++17 -Wall -Wextra -Ids4 test/binding-helpers.test.cpp -o build/test/binding-helpers.test && build/test/binding-helpers.test",
     "typecheck": "tsc --noEmit -p tsconfig.check.json"
   },
   "keywords": [
@@ -60,8 +62,9 @@
     "node-gyp": "^11.5.0"
   },
   "devDependencies": {
-    "tsx": "^4.21.0",
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.0"
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.6"
   }
 }

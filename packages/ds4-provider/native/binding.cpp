@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "binding-helpers.h"
+
 extern "C" {
 #include "ds4.h"
 }
@@ -124,48 +126,9 @@ void RemoveWorker(std::unordered_map<int, std::vector<Worker *>> &workers_by_han
   }
 }
 
-static ds4_backend ParseBackend(const std::string &backend) {
-  if (backend == "cpu") {
-    return DS4_BACKEND_CPU;
-  }
-  if (backend == "cuda") {
-    return DS4_BACKEND_CUDA;
-  }
-#ifdef __APPLE__
-  return DS4_BACKEND_METAL;
-#else
-  return DS4_BACKEND_CPU;
-#endif
-}
-
 static uint64_t DefaultSeed() {
   return static_cast<uint64_t>(
       std::chrono::high_resolution_clock::now().time_since_epoch().count());
-}
-
-static bool EndsWithStopSequence(const std::string &text,
-                                 const std::vector<std::string> &stop_sequences,
-                                 size_t *stop_start) {
-  for (const auto &stop : stop_sequences) {
-    if (stop.empty() || text.size() < stop.size()) {
-      continue;
-    }
-    if (text.compare(text.size() - stop.size(), stop.size(), stop) == 0) {
-      *stop_start = text.size() - stop.size();
-      return true;
-    }
-  }
-  return false;
-}
-
-static ds4_think_mode ParseThinkMode(const std::string &think_mode) {
-  if (think_mode == "high") {
-    return DS4_THINK_HIGH;
-  }
-  if (think_mode == "max") {
-    return DS4_THINK_MAX;
-  }
-  return DS4_THINK_NONE;
 }
 
 static ds4_tokens BuildPrompt(ModelState *model, const std::vector<ChatMessage> &messages,
