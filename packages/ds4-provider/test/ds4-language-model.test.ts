@@ -61,6 +61,19 @@ describe("parseGeneratedContent", () => {
     expect(parsed.toolCalls).toHaveLength(1);
   });
 
+  it("preserves closed reasoning when a following tool call is invalid", () => {
+    const parsed = parseGeneratedContent(
+      `need a tool</think>${dsmlToolCall.replace('name="bash"', "")}`,
+      true,
+    );
+
+    expect(parsed.toolCalls).toHaveLength(0);
+    expect(parsed.content[0]).toMatchObject({ type: "reasoning", text: "need a tool" });
+    expect(parsed.content[1]?.type === "text" ? parsed.content[1].text : "").toMatch(
+      /tool_calls/,
+    );
+  });
+
   it("parses DSML blocks with DSLS invoke tags and empty object parameters", () => {
     const parsed = parseGeneratedContent(
       "I need current info.</think>\n\n" +

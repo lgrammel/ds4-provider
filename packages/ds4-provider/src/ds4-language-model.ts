@@ -895,6 +895,7 @@ function parseGeneratedMessage(text: string, requireThinkingClosed: boolean): Ds
   const beforeTool = source.slice(0, contentTextEnd);
   const parsedPrefix: LanguageModelV4Content[] = [];
   pushReasoningAndText(parsedPrefix, beforeTool, requireThinkingClosed);
+  const base = partsToDsmlParseResult(parsedPrefix);
 
   let parsedTool: { calls: DsmlToolCall[]; rawDsml: string } | undefined;
   for (const syntax of found.syntaxes) {
@@ -905,13 +906,13 @@ function parseGeneratedMessage(text: string, requireThinkingClosed: boolean): Ds
   }
   if (!parsedTool) {
     return {
-      contentText: source,
+      contentText: base.contentText + source.slice(found.start),
+      reasoningText: base.reasoningText,
       calls: [],
       invalidToolCall: true,
     };
   }
 
-  const base = partsToDsmlParseResult(parsedPrefix);
   return {
     contentText: base.contentText,
     reasoningText: base.reasoningText,
