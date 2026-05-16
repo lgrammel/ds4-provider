@@ -1,5 +1,11 @@
 # @lgrammel/ds4-provider
 
+## 0.0.4
+
+### Patch Changes
+
+- Stream DS4 reasoning and tool inputs incrementally using a DS4-style projection state machine.
+
 ## 0.0.3
 
 ### Patch Changes
